@@ -24,6 +24,14 @@ type APIPath struct {
 	Subresource string
 }
 
+// isNamespaceSubresource reports whether s is a known subresource of the
+// namespace resource itself (as opposed to a namespace-scoped resource type).
+func isNamespaceSubresource(s string) bool {
+	// These are the standard namespace subresources in Kubernetes.
+	// https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/namespace-v1/#operations
+	return s == "finalize" || s == "status"
+}
+
 // parseAPIPath parses a Kubernetes API request path.
 // Returns a zero APIPath if the path doesn't match the expected shape.
 func parseAPIPath(path string) APIPath {
@@ -64,6 +72,15 @@ func parseAPIPath(path string) APIPath {
 		if len(rest) == 2 {
 			p.Resource = "namespaces"
 			p.Name = rest[1]
+			return p
+		}
+		// `/namespaces/<name>/<subresource>` where subresource is a known
+		// namespace subresource (finalize, status) is a subresource of the
+		// namespace resource itself, not a namespace-scoped resource.
+		if len(rest) == 3 && isNamespaceSubresource(rest[2]) {
+			p.Resource = "namespaces"
+			p.Name = rest[1]
+			p.Subresource = rest[2]
 			return p
 		}
 		p.Namespace = rest[1]

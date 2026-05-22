@@ -139,7 +139,7 @@ func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags
 			flags.AllowExec = true
 		default:
 			if strings.HasPrefix(arg, "-") {
-				return "", flags, fmt.Errorf("unknown flag for -r: %s", arg)
+				return "", flags, fmt.Errorf("unknown policy flag: %s", arg)
 			}
 			if target != "" {
 				return "", flags, errTooManyReadonlyArgs

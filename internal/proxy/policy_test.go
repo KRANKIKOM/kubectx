@@ -14,6 +14,8 @@ func TestParseAPIPath(t *testing.T) {
 		{"/api/v1/pods", APIPath{Version: "v1", Resource: "pods"}},
 		{"/api/v1/pods/", APIPath{Version: "v1", Resource: "pods"}},
 		{"/api/v1/namespaces/foo", APIPath{Version: "v1", Resource: "namespaces", Name: "foo"}},
+		{"/api/v1/namespaces/foo/finalize", APIPath{Version: "v1", Resource: "namespaces", Name: "foo", Subresource: "finalize"}},
+		{"/api/v1/namespaces/foo/status", APIPath{Version: "v1", Resource: "namespaces", Name: "foo", Subresource: "status"}},
 		{"/api/v1/namespaces/foo/pods", APIPath{Version: "v1", Namespace: "foo", Resource: "pods"}},
 		{"/api/v1/namespaces/foo/pods/bar", APIPath{Version: "v1", Namespace: "foo", Resource: "pods", Name: "bar"}},
 		{"/api/v1/namespaces/foo/pods/bar/log", APIPath{Version: "v1", Namespace: "foo", Resource: "pods", Name: "bar", Subresource: "log"}},
@@ -223,6 +225,29 @@ func TestPolicy_Decide_EvictionAllowedWithPodsRule(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/v1/namespaces/foo/pods/bar/eviction", nil)
 	if _, ok := p.Decide(r); !ok {
 		t.Error("eviction should be allowed when pods writes are allowed")
+	}
+}
+
+func TestPolicy_Decide_NamespaceSubresources(t *testing.T) {
+	p := Policy{AllowWriteResources: []ResourceRule{{Resource: "namespaces"}}}
+	cases := []struct {
+		name    string
+		method  string
+		path    string
+		allowed bool
+	}{
+		{"finalize allowed with namespaces rule", "PUT", "/api/v1/namespaces/foo/finalize", true},
+		{"status allowed with namespaces rule", "PATCH", "/api/v1/namespaces/foo/status", true},
+		{"pods not allowed with namespaces rule", "DELETE", "/api/v1/namespaces/foo/pods/p1", false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, tt.path, nil)
+			_, ok := p.Decide(r)
+			if ok != tt.allowed {
+				t.Errorf("Decide() allowed=%v, want %v", ok, tt.allowed)
+			}
+		})
 	}
 }
 
