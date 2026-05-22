@@ -91,8 +91,8 @@ func TestBuildPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(zero, proxy.Policy{}) {
-		t.Errorf("zero flags -> zero Policy, got %+v", zero)
+	if !reflect.DeepEqual(zero, proxy.PresetStrict()) {
+		t.Errorf("zero flags -> PresetStrict(), got %+v", zero)
 	}
 
 	t.Run("preset + extras layered", func(t *testing.T) {

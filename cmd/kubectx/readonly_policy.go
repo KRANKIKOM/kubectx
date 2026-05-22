@@ -39,7 +39,7 @@ func isPolicyTrigger(arg string) bool {
 // A zero-value flags struct returns the zero Policy, equivalent to strict.
 func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 	if f.isZero() {
-		return proxy.Policy{}, nil
+		return proxy.PresetStrict(), nil
 	}
 	if f.PolicyFile != "" && f.Mode != "" {
 		return proxy.Policy{}, fmt.Errorf("--policy and --mode are mutually exclusive")
@@ -72,16 +72,12 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 	return p, nil
 }
 
-// parseResourceTokens runs ParseResourceRule over each CLI token so typos
-// surface during flag parsing rather than the first kubectl call.
+// parseResourceTokens runs ParseResourceRules and wraps errors with the
+// CLI flag context.
 func parseResourceTokens(tokens []string) ([]proxy.ResourceRule, error) {
-	rules := make([]proxy.ResourceRule, 0, len(tokens))
-	for _, t := range tokens {
-		r, err := proxy.ParseResourceRule(t)
-		if err != nil {
-			return nil, fmt.Errorf("--allow-write: %w", err)
-		}
-		rules = append(rules, r)
+	rules, err := proxy.ParseResourceRules(tokens)
+	if err != nil {
+		return nil, fmt.Errorf("--allow-write: %w", err)
 	}
 	return rules, nil
 }
