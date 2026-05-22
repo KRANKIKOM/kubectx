@@ -57,8 +57,12 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 		return proxy.Policy{}, err
 	}
 
+	defaultedToStrict := f.Mode == "" && f.PolicyFile == ""
+	modified := false
+
 	if f.AllowExec {
 		p.AllowUpgrade = true
+		modified = true
 	}
 	if len(f.AllowWrite) > 0 {
 		extra, err := proxy.ParseResourceRules(f.AllowWrite)
@@ -66,10 +70,17 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 			return proxy.Policy{}, fmt.Errorf("--allow-write: %w", err)
 		}
 		p.AllowWriteResources = append(p.AllowWriteResources, extra...)
+		modified = true
 	}
 	if len(f.Namespaces) > 0 {
 		p.Namespaces = append(p.Namespaces, f.Namespaces...)
+		modified = true
 	}
+
+	if defaultedToStrict && modified {
+		p.Name = "custom"
+	}
+
 	return p, nil
 }
 
