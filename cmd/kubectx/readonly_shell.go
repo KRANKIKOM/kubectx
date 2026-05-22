@@ -77,8 +77,12 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 				printer.WarningColor.Sprint(policy.Name))
 		},
 		printExit: func(w io.Writer, prevCtx string) {
+			exitBadge := badgeLabel + " EXITED"
+			if badgeLabel != "READONLY SHELL" {
+				exitBadge = "POLICY SHELL EXITED: " + policy.Name
+			}
 			fmt.Fprintf(w, "%s kubectl context is now %s.\n",
-				badgeColor.Sprintf("[%s EXITED]", badgeLabel),
+				badgeColor.Sprintf("[%s]", exitBadge),
 				printer.WarningColor.Sprint(prevCtx))
 		},
 		transformKubeconfig: func(data []byte) ([]byte, func(), error) {
