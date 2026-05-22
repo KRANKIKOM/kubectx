@@ -42,7 +42,7 @@ func LoadPolicyFile(path string) (Policy, error) {
 		return Policy{}, fmt.Errorf("parse policy file %s: %w", path, err)
 	}
 
-	rules, err := parseResourceRules(pf.AllowWriteResources)
+	rules, err := ParseResourceRules(pf.AllowWriteResources)
 	if err != nil {
 		return Policy{}, fmt.Errorf("policy file %s: %w", path, err)
 	}
@@ -59,19 +59,3 @@ func LoadPolicyFile(path string) (Policy, error) {
 	}, nil
 }
 
-// parseResourceRules parses a slice of string tokens into ResourceRules,
-// surfacing parse errors at config-load time.
-func parseResourceRules(tokens []string) ([]ResourceRule, error) {
-	if len(tokens) == 0 {
-		return nil, nil
-	}
-	rules := make([]ResourceRule, 0, len(tokens))
-	for _, t := range tokens {
-		r, err := ParseResourceRule(t)
-		if err != nil {
-			return nil, err
-		}
-		rules = append(rules, r)
-	}
-	return rules, nil
-}

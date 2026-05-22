@@ -58,9 +58,9 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 	badgeColor := color.New(color.BgYellow, color.FgBlack, color.Bold)
 	printer.EnableOrDisableColor(badgeColor)
 
-	badgeLabel := "READONLY SHELL"
-	if policy.Name != "" && policy.Name != "strict" {
-		badgeLabel = "POLICY SHELL: " + policy.Name
+	badgeLabel := "POLICY SHELL: " + policy.Name
+	if policy.Name == "strict" {
+		badgeLabel = "READONLY SHELL"
 	}
 
 	s := &shellSession{

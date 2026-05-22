@@ -36,10 +36,11 @@ func isPolicyTrigger(arg string) bool {
 //
 // Layered flags (--allow-write, --namespace, --allow-exec) extend the base.
 //
-// A zero-value flags struct returns the zero Policy, equivalent to strict.
+// A zero-value flags struct still resolves to PresetStrict so callers get a
+// named Policy for badge/log rendering.
 func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 	if f.isZero() {
-		return proxy.Policy{}, nil
+		return proxy.PresetStrict(), nil
 	}
 	if f.PolicyFile != "" && f.Mode != "" {
 		return proxy.Policy{}, fmt.Errorf("--policy and --mode are mutually exclusive")
@@ -60,9 +61,9 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 		p.AllowUpgrade = true
 	}
 	if len(f.AllowWrite) > 0 {
-		extra, err := parseResourceTokens(f.AllowWrite)
+		extra, err := proxy.ParseResourceRules(f.AllowWrite)
 		if err != nil {
-			return proxy.Policy{}, err
+			return proxy.Policy{}, fmt.Errorf("--allow-write: %w", err)
 		}
 		p.AllowWriteResources = append(p.AllowWriteResources, extra...)
 	}
@@ -70,20 +71,6 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 		p.Namespaces = append(p.Namespaces, f.Namespaces...)
 	}
 	return p, nil
-}
-
-// parseResourceTokens runs ParseResourceRule over each CLI token so typos
-// surface during flag parsing rather than the first kubectl call.
-func parseResourceTokens(tokens []string) ([]proxy.ResourceRule, error) {
-	rules := make([]proxy.ResourceRule, 0, len(tokens))
-	for _, t := range tokens {
-		r, err := proxy.ParseResourceRule(t)
-		if err != nil {
-			return nil, fmt.Errorf("--allow-write: %w", err)
-		}
-		rules = append(rules, r)
-	}
-	return rules, nil
 }
 
 func (f ReadonlyPolicyFlags) isZero() bool {

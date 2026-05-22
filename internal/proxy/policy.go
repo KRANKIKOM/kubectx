@@ -26,6 +26,23 @@ type ResourceRule struct {
 	All      bool // matches every resource (the "*" form)
 }
 
+// ParseResourceRules runs ParseResourceRule over each token, surfacing
+// parse errors at config-load time so typos don't reach the request path.
+func ParseResourceRules(tokens []string) ([]ResourceRule, error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	rules := make([]ResourceRule, 0, len(tokens))
+	for _, t := range tokens {
+		r, err := ParseResourceRule(t)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, r)
+	}
+	return rules, nil
+}
+
 // ParseResourceRule parses a token of the form "*", "resource", or
 // "group/resource". Empty or malformed tokens return an error.
 func ParseResourceRule(s string) (ResourceRule, error) {
