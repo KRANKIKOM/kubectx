@@ -58,13 +58,15 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 	badgeColor := color.New(color.BgYellow, color.FgBlack, color.Bold)
 	printer.EnableOrDisableColor(badgeColor)
 
-	// The "READONLY SHELL" badge only applies when no writes or upgrades
-	// are permitted. Any layered flag (--allow-exec, --allow-write) trips
-	// the broader "POLICY SHELL" wording so users see at a glance that the
-	// shell isn't a true readonly.
-	badgeLabel := "POLICY SHELL: " + policy.Name
+	// badgeType is the kind of shell; badgeSuffix carries the policy name
+	// when it's not pure readonly. Kept separate so the exit message can
+	// place "EXITED" next to the type rather than after the policy name,
+	// where it would read as part of the name (e.g. "relaxed EXITED").
+	badgeType := "POLICY SHELL"
+	badgeSuffix := ": " + policy.Name
 	if !policy.AllowUpgrade && len(policy.AllowWriteResources) == 0 {
-		badgeLabel = "READONLY SHELL"
+		badgeType = "READONLY SHELL"
+		badgeSuffix = ""
 	}
 
 	s := &shellSession{
@@ -72,13 +74,13 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 		extraEnv: []string{env.EnvReadonlyShell + "=1"},
 		printEntry: func(w io.Writer, ctxName string) {
 			fmt.Fprintf(w, "%s kubectl context is %s under policy %s — type 'exit' to leave.\n",
-				badgeColor.Sprintf("[%s]", badgeLabel),
+				badgeColor.Sprintf("[%s%s]", badgeType, badgeSuffix),
 				printer.WarningColor.Sprint(ctxName),
 				printer.WarningColor.Sprint(policy.Name))
 		},
 		printExit: func(w io.Writer, prevCtx string) {
 			fmt.Fprintf(w, "%s kubectl context is now %s.\n",
-				badgeColor.Sprintf("[%s EXITED]", badgeLabel),
+				badgeColor.Sprintf("[%s EXITED%s]", badgeType, badgeSuffix),
 				printer.WarningColor.Sprint(prevCtx))
 		},
 		transformKubeconfig: func(data []byte) ([]byte, func(), error) {
