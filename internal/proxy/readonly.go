@@ -53,8 +53,9 @@ type ReadonlyProxy struct {
 type Config struct {
 	KubeconfigPath string
 	ContextName    string
-	// Policy describes which requests to allow. nil means strict default.
-	Policy *Policy
+	// Policy describes which requests to allow. The zero value is
+	// equivalent to PresetStrict.
+	Policy Policy
 }
 
 // Start creates and starts a readonly reverse proxy on a random localhost port.
@@ -80,19 +81,23 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	policy := cfg.Policy
-	if policy == nil {
-		policy = PresetStrict()
-	}
-	handler := NewHandlerWithPolicy(targetURL, transport, policy)
+	handler := NewHandlerWithPolicy(targetURL, transport, cfg.Policy)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen: %w", err)
 	}
 
-	srv := &http.Server{Handler: handler}
-	go srv.Serve(listener)
+	// Surface server errors loudly. A dead proxy means kubectl gets
+	// ECONNREFUSED with no context — the user's prompt still shows the
+	// "readonly shell" badge while no enforcement is happening.
+	stderrLog := log.New(os.Stderr, "[kubectx readonly-proxy] ", log.Ltime)
+	srv := &http.Server{Handler: handler, ErrorLog: stderrLog}
+	go func() {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			stderrLog.Printf("server died: %v", err)
+		}
+	}()
 
 	debugLog.Printf("started on %s, proxying to %s", listener.Addr(), targetURL)
 
@@ -126,10 +131,11 @@ func checkRequest(r *http.Request) (reason string, allowed bool) {
 }
 
 // NewHandlerWithPolicy creates the readonly proxy HTTP handler using the given policy.
-func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy *Policy) http.Handler {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.FlushInterval = -1 // flush immediately for streaming (logs -f, watches)
+func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy Policy) http.Handler {
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.Transport = transport
+	rp.FlushInterval = -1 // flush immediately for streaming (logs -f, watches)
+	rp.ErrorLog = debugLog
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		debugLog.Printf(">> %s %s", r.Method, r.URL.Path)
@@ -142,13 +148,23 @@ func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy *
 		}
 
 		debugLog.Printf("<< %s %s -> proxied", r.Method, r.URL.Path)
-		proxy.ServeHTTP(w, r)
+		rp.ServeHTTP(w, r)
 	})
 }
 
 // isUpgrade returns true if the request is a protocol upgrade (SPDY/WebSocket).
+// Tokenizes the Connection header so values like "keep-alive, Upgrade" are
+// recognized.
 func isUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Connection"), "Upgrade") || r.Header.Get("Upgrade") != ""
+	if r.Header.Get("Upgrade") != "" {
+		return true
+	}
+	for _, tok := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "Upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 // isReadOnly returns true for safe HTTP methods that never modify state.

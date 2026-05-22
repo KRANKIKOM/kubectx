@@ -31,6 +31,15 @@ func (op UnsupportedOp) Run(_, _ io.Writer) error {
 	return op.Err
 }
 
+// triggerLabel strips =value from a flag so error messages quote the flag
+// alone (`'--mode' accepts ...`) rather than echoing the user's value.
+func triggerLabel(arg string) string {
+	if i := strings.Index(arg, "="); i >= 0 {
+		return arg[:i]
+	}
+	return arg
+}
+
 // parseArgs looks at flags (excl. executable name, i.e. argv[0])
 // and decides which operation should be taken.
 func parseArgs(argv []string) Op {
@@ -42,11 +51,12 @@ func parseArgs(argv []string) Op {
 	}
 
 	// Any of these at argv[0] triggers policy-shell mode. `-r`/`--readonly`
-	// is kept as a back-compat alias for `--mode=strict`.
+	// keeps the original entry point so existing invocations get the strict
+	// default; the others let callers enter policy-shell mode without `-r`.
 	if isPolicyTrigger(argv[0]) {
 		rest := argv
-		trigger := argv[0]
-		if trigger == "-r" || trigger == "--readonly" {
+		trigger := triggerLabel(argv[0])
+		if argv[0] == "-r" || argv[0] == "--readonly" {
 			rest = argv[1:]
 		}
 		target, flags, err := parseReadonlyFlags(rest)

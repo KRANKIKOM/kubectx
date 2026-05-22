@@ -7,12 +7,14 @@ import "strings"
 // Examples:
 //
 //	/api/v1/pods                                  -> {Resource: "pods"}
+//	/api/v1/namespaces/foo                        -> {Resource: "namespaces", Name: "foo"}  (request for one namespace; cluster-scoped)
 //	/api/v1/namespaces/foo/pods                   -> {Namespace: "foo", Resource: "pods"}
 //	/api/v1/namespaces/foo/pods/bar               -> {Namespace: "foo", Resource: "pods", Name: "bar"}
 //	/api/v1/namespaces/foo/pods/bar/log           -> {Namespace: "foo", Resource: "pods", Name: "bar", Subresource: "log"}
 //	/apis/apps/v1/namespaces/foo/deployments      -> {Group: "apps", Namespace: "foo", Resource: "deployments"}
-//	/apis/apps/v1/deployments                     -> {Group: "apps", Resource: "deployments"}  (cross-namespace list)
+//	/apis/apps/v1/deployments                     -> {Group: "apps", Resource: "deployments"}  (cross-namespace list/deleteCollection)
 //	/api/v1/nodes/n1                              -> {Resource: "nodes", Name: "n1"}          (cluster-scoped)
+//	/healthz                                      -> zero APIPath (unrecognized — callers treat as deny)
 type APIPath struct {
 	Group       string
 	Version     string
@@ -26,7 +28,7 @@ type APIPath struct {
 // Returns a zero APIPath if the path doesn't match the expected shape.
 func parseAPIPath(path string) APIPath {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) == 0 {
+	if len(parts) == 0 || parts[0] == "" {
 		return APIPath{}
 	}
 
@@ -35,14 +37,12 @@ func parseAPIPath(path string) APIPath {
 
 	switch parts[0] {
 	case "api":
-		// /api/v1/...
 		if len(parts) < 2 {
 			return APIPath{}
 		}
 		p.Version = parts[1]
 		rest = parts[2:]
 	case "apis":
-		// /apis/<group>/<version>/...
 		if len(parts) < 3 {
 			return APIPath{}
 		}
@@ -53,9 +53,14 @@ func parseAPIPath(path string) APIPath {
 		return APIPath{}
 	}
 
+	// Drop a trailing empty segment (e.g. "/api/v1/pods/").
+	if len(rest) > 0 && rest[len(rest)-1] == "" {
+		rest = rest[:len(rest)-1]
+	}
+
 	if len(rest) >= 2 && rest[0] == "namespaces" {
-		// could be a request for a specific namespace ("/namespaces/foo")
-		// or a namespaced sub-path ("/namespaces/foo/pods/...")
+		// `/namespaces/<name>` alone is a request targeting that namespace
+		// as a resource (cluster-scoped); deeper paths are namespace-scoped.
 		if len(rest) == 2 {
 			p.Resource = "namespaces"
 			p.Name = rest[1]

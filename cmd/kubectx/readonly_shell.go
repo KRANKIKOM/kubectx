@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"time"
 
@@ -26,14 +27,19 @@ type ReadonlyShellOp struct {
 	PolicyFlags ReadonlyPolicyFlags
 }
 
-// ReadonlyPolicyFlags captures the policy-shaping flags accepted by `-r`.
-// All fields are optional; the zero value means "use the strict default".
+// ReadonlyPolicyFlags captures the policy-shaping flags accepted by the
+// readonly shell entry points. The zero value yields the strict default.
+//
+// Precedence (see buildPolicy):
+//   - PolicyFile and Mode are mutually exclusive bases. If both are set,
+//     buildPolicy errors out rather than silently picking one.
+//   - AllowWrite, Namespaces and AllowExec layer on top of the chosen base.
 type ReadonlyPolicyFlags struct {
-	Mode       string   // --mode=strict|relaxed|debug
-	PolicyFile string   // --policy=path/to/file.yaml
-	AllowWrite []string // --allow-write=configmaps,apps/deployments
-	Namespaces []string // --namespace=dev,staging
-	AllowExec  bool     // --allow-exec
+	Mode       string
+	PolicyFile string
+	AllowWrite []string
+	Namespaces []string
+	AllowExec  bool
 }
 
 func (op InteractiveReadonlyShellOp) Run(_, stderr io.Writer) error {
@@ -52,16 +58,24 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 	badgeColor := color.New(color.BgYellow, color.FgBlack, color.Bold)
 	printer.EnableOrDisableColor(badgeColor)
 
+	badgeLabel := "READONLY SHELL"
+	if policy.Name != "" && policy.Name != "strict" {
+		badgeLabel = "POLICY SHELL: " + policy.Name
+	}
+
 	s := &shellSession{
 		target:   op.Target,
 		extraEnv: []string{env.EnvReadonlyShell + "=1"},
 		printEntry: func(w io.Writer, ctxName string) {
-			fmt.Fprintf(w, "%s kubectl context is %s in READ-ONLY mode — type 'exit' to leave.\n",
-				badgeColor.Sprint("[READONLY SHELL]"), printer.WarningColor.Sprint(ctxName))
+			fmt.Fprintf(w, "%s kubectl context is %s under policy %s — type 'exit' to leave.\n",
+				badgeColor.Sprintf("[%s]", badgeLabel),
+				printer.WarningColor.Sprint(ctxName),
+				printer.WarningColor.Sprint(policy.Name))
 		},
 		printExit: func(w io.Writer, prevCtx string) {
 			fmt.Fprintf(w, "%s kubectl context is now %s.\n",
-				badgeColor.Sprint("[READONLY SHELL EXITED]"), printer.WarningColor.Sprint(prevCtx))
+				badgeColor.Sprintf("[%s EXITED]", badgeLabel),
+				printer.WarningColor.Sprint(prevCtx))
 		},
 		transformKubeconfig: func(data []byte) ([]byte, func(), error) {
 			// Write original kubeconfig to temp file for the proxy to load TLS/auth.
@@ -97,7 +111,11 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 				return nil, nil, fmt.Errorf("failed to rewrite kubeconfig: %w", err)
 			}
 
-			time.Sleep(10 * time.Millisecond)
+			if err := waitForProxy(p.Addr(), 2*time.Second); err != nil {
+				p.Shutdown(context.Background())
+				os.Remove(origPath)
+				return nil, nil, fmt.Errorf("readonly proxy did not become ready: %w", err)
+			}
 
 			cleanup := func() {
 				p.Shutdown(context.Background())
@@ -107,4 +125,21 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 		},
 	}
 	return s.run(stderr)
+}
+
+// waitForProxy blocks until the local proxy at addr accepts a TCP connection,
+// or until budget elapses.
+func waitForProxy(addr string, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out after %s: %w", budget, lastErr)
 }

@@ -52,23 +52,28 @@ Both spawn a subshell with a scoped `KUBECONFIG` pointing at a temp file contain
 - `-s` / `--shell` (`shell.go`): scope only. Subshell sees one context; writes still go to the real API server.
 - `-r` / `--readonly` (`readonly_shell.go`): scope **plus** enforcement. Before spawning, it starts a localhost reverse proxy (`proxy.Start`) and rewrites the temp kubeconfig (`proxy.RewriteKubeconfig`) so the server URL points at `http://127.0.0.1:<random>` and cluster TLS/auth fields are stripped (auth happens inside the proxy via the original credentials). `KUBECTX_READONLY_SHELL=1` is informational — actual enforcement is HTTP-layer in the proxy.
 
-### Readonly proxy enforcement (`internal/proxy/readonly.go`, `policy.go`)
+### Readonly / policy proxy enforcement (`internal/proxy/`)
 
-Two layers:
+Despite the `-r` flag name, this is a general **policy-scoped shell** — readonly is just the strictest preset of a configurable `Policy`. The proxy intercepts every kubectl request and runs `Policy.Decide`. Files:
 
-1. **Fixed predicates** (`readonly.go`): `isUpgrade`, `isReadOnly`, `isNonMutatingPost` (anchored regex allowlist for `*Review` endpoints), `isDryRun`.
-2. **Policy** (`policy.go`): user-shaped allow/deny rules — per-resource write allowlist, per-namespace scope, exec/upgrade toggle. Presets in `presets.go` (`strict` = original behavior; `relaxed`, `debug`). YAML loader in `policyfile.go`. CLI glue in `cmd/kubectx/readonly_policy.go` (flag parsing + `buildPolicy`).
+- `policy.go` — `Policy` value type with `Decide(r) (reason, allowed)`. Decide takes a value receiver — the zero value is equivalent to `PresetStrict`.
+- `path.go` — `parseAPIPath` turns request paths into `{Group, Version, Namespace, Resource, Name, Subresource}`.
+- `presets.go` — `PresetStrict`/`Relaxed`/`Debug`. `PresetByName("")` resolves to strict.
+- `policyfile.go` — `LoadPolicyFile` uses `yaml.UnmarshalStrict` so unknown YAML fields are rejected. Resource tokens (`"configmaps"`, `"apps/deployments"`, `"*"`) parse via `ParseResourceRule`.
+- `readonly.go` — `Start(Config)` runs the proxy with `Config.Policy` (zero value = strict). The handler delegates to `Policy.Decide` per request.
 
-`Policy.Decide` runs the fixed predicates first, then consults the allowlists for mutating methods. Namespace scoping gates **writes only** — reads and cluster-scoped resources are untouched so `kubectl get nodes` still works. `parseAPIPath` (`path.go`) turns request paths into `{Group, Version, Namespace, Resource, Name, Subresource}` for matching.
+`Decide`'s evaluation order:
 
-In order, `Decide` checks:
-1. **Block protocol upgrades** (`Connection: Upgrade` / `Upgrade:` header), unless `Policy.AllowUpgrade` — this is what stops `kubectl exec`, `cp`, `port-forward`, `attach` (SPDY/WebSocket).
-2. **Allow safe methods**: `GET`, `HEAD`, `OPTIONS`.
-3. **Allow non-mutating POSTs** matching `nonMutatingPostPatterns` (SubjectAccessReview, TokenReview, SelfSubjectRulesReview, etc.) — these are POSTs by API design but don't persist resources. Patterns are anchored to the `authorization.k8s.io` / `authentication.k8s.io` API groups to prevent CRD spoofing.
-4. **Allow `?dryRun=All`** queries.
-5. Everything else returns `405 Method Not Allowed` with a `metav1.Status` body so `kubectl` prints a clean error.
+1. **Upgrade subresources** (`exec`/`attach`/`portforward`/`proxy`): require `AllowUpgrade=true` regardless of method. Then enforce namespace allowlist. Otherwise deny.
+2. **Upgrade header on a non-upgrade path**: always deny, even when `AllowUpgrade=true`. (Closes a smuggling vector — `DELETE /pods/p1` with `Upgrade: foo` won't bypass the write check.)
+3. **Safe methods** (`GET`/`HEAD`/`OPTIONS`): allow.
+4. **Non-mutating POSTs** (SubjectAccessReview, TokenReview, etc.): regex-anchored to `authorization.k8s.io` / `authentication.k8s.io` API groups to prevent CRD spoofing.
+5. **`?dryRun=All`**: allow.
+6. **Unrecognized path** (`Resource == ""`): deny.
+7. **Namespace allowlist** (if `Namespaces` is non-empty): the request's namespace must be in the list. For `namespaces/<name>` resource the `Name` is treated as the target namespace. Cluster-scoped or cross-namespace deletecollection paths (no `/namespaces/foo/` segment) are denied when a namespace allowlist is in effect.
+8. **Resource allowlist** (`AllowWriteResources`): match by `ResourceRule{Group, Resource, All}`. Otherwise deny.
 
-Set `KUBECTX_DEBUG=1` to see proxy decisions on stderr (`[readonly-proxy] >> METHOD PATH -> proxied/405`).
+Set `DEBUG=1` (the env var is just `DEBUG`, not `KUBECTX_DEBUG`) to see proxy decisions on stderr (`[readonly-proxy] >> METHOD PATH -> proxied/405`). Server-loop errors are unconditionally logged with prefix `[kubectx readonly-proxy]`.
 
 ### Tests
 

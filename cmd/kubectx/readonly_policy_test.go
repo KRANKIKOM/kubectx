@@ -2,7 +2,10 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/ahmetb/kubectx/internal/proxy"
 )
 
 func TestIsPolicyTrigger(t *testing.T) {
@@ -14,7 +17,8 @@ func TestIsPolicyTrigger(t *testing.T) {
 		"--namespace", "-n", "--namespace=dev",
 		"--allow-exec",
 	}
-	no := []string{"-s", "-d", "prod", "--help", "-h", "--shell", "ctx-name", "-c"}
+	no := []string{"-s", "-d", "prod", "--help", "-h", "--shell", "ctx-name", "-c",
+		"--mode-something", "--policyfile", "--allow-writes", "--n", ""}
 	for _, a := range yes {
 		if !isPolicyTrigger(a) {
 			t.Errorf("isPolicyTrigger(%q) = false, want true", a)
@@ -56,6 +60,12 @@ func TestParseReadonlyFlags(t *testing.T) {
 			"", ReadonlyPolicyFlags{}, true},
 		{"missing value", []string{"--mode"},
 			"", ReadonlyPolicyFlags{}, true},
+		{"allow-exec rejects value", []string{"--allow-exec=true", "prod"},
+			"", ReadonlyPolicyFlags{}, true},
+		{"allow-exec rejects value false", []string{"--allow-exec=false", "prod"},
+			"", ReadonlyPolicyFlags{}, true},
+		{"csv trims whitespace and empties", []string{"--allow-write= configmaps , , secrets ", "prod"},
+			"prod", ReadonlyPolicyFlags{AllowWrite: []string{"configmaps", "secrets"}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,46 +87,61 @@ func TestParseReadonlyFlags(t *testing.T) {
 }
 
 func TestBuildPolicy(t *testing.T) {
-	// zero flags -> nil policy (use strict default)
-	p, err := ReadonlyPolicyFlags{}.buildPolicy()
+	zero, err := ReadonlyPolicyFlags{}.buildPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != nil {
-		t.Errorf("expected nil policy for zero flags, got %+v", p)
+	if !reflect.DeepEqual(zero, proxy.Policy{}) {
+		t.Errorf("zero flags -> zero Policy, got %+v", zero)
 	}
 
-	// mode + extras layered on top
-	p, err = ReadonlyPolicyFlags{
-		Mode:       "relaxed",
-		AllowWrite: []string{"namespaces"},
-		AllowExec:  true,
-		Namespaces: []string{"dev"},
-	}.buildPolicy()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !p.AllowUpgrade {
-		t.Error("expected AllowUpgrade=true")
-	}
-	if !contains(p.AllowWriteResources, "namespaces") {
-		t.Errorf("expected namespaces in AllowWriteResources, got %v", p.AllowWriteResources)
-	}
-	if !contains(p.Namespaces, "dev") {
-		t.Errorf("expected dev in Namespaces, got %v", p.Namespaces)
-	}
-
-	// unknown mode bubbles up
-	if _, err := (ReadonlyPolicyFlags{Mode: "bogus"}).buildPolicy(); err == nil {
-		t.Error("expected error for unknown mode")
-	}
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
+	t.Run("preset + extras layered", func(t *testing.T) {
+		got, err := ReadonlyPolicyFlags{
+			Mode:       "relaxed",
+			AllowWrite: []string{"namespaces"},
+			AllowExec:  true,
+			Namespaces: []string{"dev"},
+		}.buildPolicy()
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	return false
+		want := proxy.Policy{
+			Name:         "relaxed",
+			AllowUpgrade: true,
+			AllowWriteResources: []proxy.ResourceRule{
+				{Resource: "configmaps"},
+				{Resource: "secrets"},
+				{Group: "apps", Resource: "deployments"},
+				{Group: "apps", Resource: "statefulsets"},
+				{Resource: "namespaces"},
+			},
+			Namespaces: []string{"dev"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("buildPolicy() = %+v\nwant %+v", got, want)
+		}
+	})
+
+	t.Run("unknown mode bubbles up", func(t *testing.T) {
+		if _, err := (ReadonlyPolicyFlags{Mode: "bogus"}).buildPolicy(); err == nil {
+			t.Error("expected error for unknown mode")
+		}
+	})
+
+	t.Run("mode + policy file rejected", func(t *testing.T) {
+		_, err := (ReadonlyPolicyFlags{Mode: "relaxed", PolicyFile: "ro.yaml"}).buildPolicy()
+		if err == nil {
+			t.Fatal("expected error when both --mode and --policy are given")
+		}
+		if !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid resource token surfaces parse error", func(t *testing.T) {
+		_, err := (ReadonlyPolicyFlags{AllowWrite: []string{"apps/"}}).buildPolicy()
+		if err == nil {
+			t.Error("expected error for invalid resource token")
+		}
+	})
 }

@@ -6,36 +6,104 @@ import (
 	"strings"
 )
 
+// upgradeSubresources is the set of pod subresources that legitimately use
+// protocol upgrades (SPDY/WebSocket) and would let a client tunnel arbitrary
+// traffic past HTTP-method filtering. Treated as a single class gated by
+// Policy.AllowUpgrade regardless of method.
+var upgradeSubresources = map[string]struct{}{
+	"exec":        {},
+	"attach":      {},
+	"portforward": {},
+	"proxy":       {},
+}
+
+// ResourceRule allows writes on a specific (group, resource).
+// Use ParseResourceRule to construct from string form ("configmaps",
+// "apps/deployments", "*").
+type ResourceRule struct {
+	Group    string
+	Resource string
+	All      bool // matches every resource (the "*" form)
+}
+
+// ParseResourceRule parses a token of the form "*", "resource", or
+// "group/resource". Empty or malformed tokens return an error.
+func ParseResourceRule(s string) (ResourceRule, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ResourceRule{}, fmt.Errorf("resource rule is empty")
+	}
+	if s == "*" {
+		return ResourceRule{All: true}, nil
+	}
+	grp, res, ok := strings.Cut(s, "/")
+	if !ok {
+		return ResourceRule{Group: "", Resource: grp}, nil
+	}
+	if grp == "" || res == "" || strings.Contains(res, "/") {
+		return ResourceRule{}, fmt.Errorf("resource rule %q: expected '<resource>' or '<group>/<resource>'", s)
+	}
+	return ResourceRule{Group: grp, Resource: res}, nil
+}
+
+func (r ResourceRule) matches(group, resource string) bool {
+	if r.All {
+		return true
+	}
+	return r.Group == group && r.Resource == resource
+}
+
 // Policy describes which requests the readonly proxy should allow.
-// The zero value blocks everything; use a preset (PresetStrict, etc.) or
-// build one explicitly.
+// The zero value is equivalent to PresetStrict: reads/reviews/dry-run pass,
+// everything else is blocked.
 type Policy struct {
-	// Name is used in debug logs and 405 error messages.
+	// Name is used in debug logs and 405 error reasons.
 	Name string
 
-	// AllowWriteResources is a list of "group/resource" tokens (or bare
-	// "resource" for the core group) that may be mutated. e.g.
-	// {"configmaps", "apps/deployments"}. "*" allows all.
-	AllowWriteResources []string
+	// AllowWriteResources lists (group, resource) pairs that may be mutated.
+	AllowWriteResources []ResourceRule
 
 	// Namespaces, if non-empty, restricts mutating operations to these
-	// namespaces. Reads and cluster-scoped resources are unaffected so
-	// `kubectl get nodes` still works.
+	// namespaces. Reads pass through unchanged. Mutations on cluster-scoped
+	// or cross-namespace (deletecollection-style) paths are blocked when a
+	// namespace allowlist is in effect; use an empty Namespaces list to
+	// allow cluster-scoped writes.
 	Namespaces []string
 
-	// AllowUpgrade permits protocol upgrades — exec, cp, port-forward, attach.
+	// AllowUpgrade permits protocol upgrades on the upgrade subresources
+	// (exec, attach, portforward, proxy). Mutating requests on other paths
+	// are NOT bypassed by an Upgrade header — they still go through the
+	// usual write/namespace checks.
 	AllowUpgrade bool
 }
 
 // Decide returns ("", true) if the request is allowed, or (reason, false)
-// if it should be blocked.
-func (p *Policy) Decide(r *http.Request) (reason string, allowed bool) {
-	if isUpgrade(r) {
+// if it should be blocked. The reason is embedded in the 405 response.
+func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
+	info := parseAPIPath(r.URL.Path)
+	upgrade := isUpgrade(r)
+	_, isUpgradeSub := upgradeSubresources[info.Subresource]
+
+	// Upgrade subresources (exec/attach/portforward/proxy) are a special
+	// class: they require AllowUpgrade regardless of method, since they
+	// tunnel traffic past HTTP filtering. Namespace allowlist still applies.
+	if isUpgradeSub {
 		if !p.AllowUpgrade {
-			return "exec/cp/port-forward are not allowed (policy " + p.Name + ")", false
+			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
+		}
+		if reason, ok := p.checkNamespace(info); !ok {
+			return reason, false
 		}
 		return "", true
 	}
+
+	// Upgrade header on a non-upgrade path is suspect; block regardless of
+	// AllowUpgrade. This closes the Codex P1 bypass where an Upgrade header
+	// on DELETE /pods/<n> would short-circuit policy.
+	if upgrade {
+		return p.deny("protocol upgrade not permitted on this path"), false
+	}
+
 	if isReadOnly(r) {
 		return "", true
 	}
@@ -46,39 +114,55 @@ func (p *Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		return "", true
 	}
 
-	info := parseAPIPath(r.URL.Path)
+	// Beyond this point we are evaluating a mutating request.
 	if info.Resource == "" {
-		return fmt.Sprintf("%s requests are not allowed (policy %s)", r.Method, p.Name), false
+		return p.deny(fmt.Sprintf("%s requests are not allowed", r.Method)), false
 	}
 
-	if len(p.Namespaces) > 0 && info.Namespace != "" && !contains(p.Namespaces, info.Namespace) {
-		return fmt.Sprintf("namespace %q not in policy allowlist", info.Namespace), false
+	if reason, ok := p.checkNamespace(info); !ok {
+		return reason, false
 	}
 
 	if !p.allowsWrite(info) {
-		return fmt.Sprintf("%s on %s not allowed (policy %s)", r.Method, resourceLabel(info), p.Name), false
+		return p.deny(fmt.Sprintf("%s on %s not allowed", r.Method, resourceLabel(info))), false
 	}
 	return "", true
 }
 
-func (p *Policy) allowsWrite(info APIPath) bool {
-	for _, tok := range p.AllowWriteResources {
-		if tok == "*" {
-			return true
-		}
-		grp, res, ok := strings.Cut(tok, "/")
-		if !ok {
-			// bare "resource" matches the core group
-			if info.Group == "" && info.Resource == tok {
-				return true
-			}
-			continue
-		}
-		if grp == info.Group && res == info.Resource {
+// checkNamespace enforces the Namespaces allowlist for mutating requests.
+// Returns ok=true when the request is allowed to proceed.
+func (p Policy) checkNamespace(info APIPath) (reason string, ok bool) {
+	if len(p.Namespaces) == 0 {
+		return "", true
+	}
+	target := info.Namespace
+	// Mutations on `namespaces/<name>` are scoped to <name>, not a parent ns.
+	if info.Namespace == "" && info.Resource == "namespaces" && info.Name != "" {
+		target = info.Name
+	}
+	if target == "" {
+		return p.deny(fmt.Sprintf("mutation on cluster-scoped or cross-namespace path %s not allowed while --namespace allowlist is set", resourceLabel(info))), false
+	}
+	if !contains(p.Namespaces, target) {
+		return p.deny(fmt.Sprintf("namespace %q not in policy allowlist", target)), false
+	}
+	return "", true
+}
+
+func (p Policy) allowsWrite(info APIPath) bool {
+	for _, rule := range p.AllowWriteResources {
+		if rule.matches(info.Group, info.Resource) {
 			return true
 		}
 	}
 	return false
+}
+
+func (p Policy) deny(msg string) string {
+	if p.Name == "" {
+		return msg
+	}
+	return msg + " (policy " + p.Name + ")"
 }
 
 func resourceLabel(info APIPath) string {

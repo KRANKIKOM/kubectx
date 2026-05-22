@@ -8,14 +8,14 @@ import (
 	"github.com/ahmetb/kubectx/internal/proxy"
 )
 
-// errTooManyReadonlyArgs is a sentinel so the caller can replace
-// the literal "-r"/"--readonly" in the message.
+// errTooManyReadonlyArgs is a sentinel so the caller can substitute the
+// originally-typed trigger flag in the error message.
 var errTooManyReadonlyArgs = errors.New("too many context arguments")
 
-// isPolicyTrigger reports whether arg, when it appears at argv[0], should
-// route the command into policy-shell mode. `-r`/`--readonly` is the
-// back-compat alias for `--mode=strict`; the others let callers skip `-r`
-// entirely (`kubectx --policy=ro.yaml prod`).
+// isPolicyTrigger reports whether arg, appearing at argv[0], should route
+// the command into policy-shell mode. `-r`/`--readonly` keeps the original
+// entry point so existing invocations get strict mode by default; the
+// other flags let callers enter policy-shell mode without `-r` at all.
 func isPolicyTrigger(arg string) bool {
 	if arg == "-r" || arg == "--readonly" {
 		return true
@@ -28,39 +28,43 @@ func isPolicyTrigger(arg string) bool {
 	return false
 }
 
-// buildPolicy assembles a *proxy.Policy from the CLI flags. Precedence:
+// buildPolicy assembles a proxy.Policy from the CLI flags.
 //
-//  1. start from --mode preset (default "strict")
-//  2. layer --policy=<file> on top, fully replacing the preset
-//  3. apply individual flags (--allow-write, --namespace, --allow-exec)
-//     as additions to whatever we have so far
+// Base policy:
+//   - if --policy=<file> is given, the file is the base (and --mode is rejected)
+//   - else --mode picks a preset (empty Mode resolves to "strict")
 //
-// A nil return means "use the strict default" — proxy.Start handles that.
-func (f ReadonlyPolicyFlags) buildPolicy() (*proxy.Policy, error) {
+// Layered flags (--allow-write, --namespace, --allow-exec) extend the base.
+//
+// A zero-value flags struct returns the zero Policy, equivalent to strict.
+func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 	if f.isZero() {
-		return nil, nil
+		return proxy.Policy{}, nil
+	}
+	if f.PolicyFile != "" && f.Mode != "" {
+		return proxy.Policy{}, fmt.Errorf("--policy and --mode are mutually exclusive")
 	}
 
-	var p *proxy.Policy
+	var p proxy.Policy
+	var err error
 	if f.PolicyFile != "" {
-		var err error
 		p, err = proxy.LoadPolicyFile(f.PolicyFile)
-		if err != nil {
-			return nil, err
-		}
 	} else {
-		var err error
 		p, err = proxy.PresetByName(f.Mode)
-		if err != nil {
-			return nil, err
-		}
+	}
+	if err != nil {
+		return proxy.Policy{}, err
 	}
 
 	if f.AllowExec {
 		p.AllowUpgrade = true
 	}
 	if len(f.AllowWrite) > 0 {
-		p.AllowWriteResources = append(p.AllowWriteResources, f.AllowWrite...)
+		extra, err := parseResourceTokens(f.AllowWrite)
+		if err != nil {
+			return proxy.Policy{}, err
+		}
+		p.AllowWriteResources = append(p.AllowWriteResources, extra...)
 	}
 	if len(f.Namespaces) > 0 {
 		p.Namespaces = append(p.Namespaces, f.Namespaces...)
@@ -68,11 +72,29 @@ func (f ReadonlyPolicyFlags) buildPolicy() (*proxy.Policy, error) {
 	return p, nil
 }
 
-// parseReadonlyFlags scans argv (the args *after* `-r`/`--readonly`) and
-// pulls out policy flags plus the positional context name. Flags may
-// appear before or after the context name.
-//
-// Returns the context name ("" if not provided) and the parsed flags.
+// parseResourceTokens runs ParseResourceRule over each CLI token so typos
+// surface during flag parsing rather than the first kubectl call.
+func parseResourceTokens(tokens []string) ([]proxy.ResourceRule, error) {
+	rules := make([]proxy.ResourceRule, 0, len(tokens))
+	for _, t := range tokens {
+		r, err := proxy.ParseResourceRule(t)
+		if err != nil {
+			return nil, fmt.Errorf("--allow-write: %w", err)
+		}
+		rules = append(rules, r)
+	}
+	return rules, nil
+}
+
+func (f ReadonlyPolicyFlags) isZero() bool {
+	return f.Mode == "" && f.PolicyFile == "" &&
+		len(f.AllowWrite) == 0 && len(f.Namespaces) == 0 && !f.AllowExec
+}
+
+// parseReadonlyFlags scans argv (the args *after* `-r`/`--readonly`, or the
+// full argv when invoked via a bare policy flag) and pulls out policy flags
+// plus the positional context name. Flags may appear before or after the
+// context name.
 func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags, err error) {
 	for i := 0; i < len(argv); i++ {
 		arg := argv[i]
@@ -115,6 +137,9 @@ func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags
 			}
 			flags.Namespaces = append(flags.Namespaces, splitCSV(v)...)
 		case "--allow-exec":
+			if hasEq {
+				return "", flags, fmt.Errorf("--allow-exec does not take a value")
+			}
 			flags.AllowExec = true
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -127,11 +152,6 @@ func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags
 		}
 	}
 	return target, flags, nil
-}
-
-func (f ReadonlyPolicyFlags) isZero() bool {
-	return f.Mode == "" && f.PolicyFile == "" &&
-		len(f.AllowWrite) == 0 && len(f.Namespaces) == 0 && !f.AllowExec
 }
 
 func splitCSV(s string) []string {

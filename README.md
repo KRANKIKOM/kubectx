@@ -61,7 +61,8 @@ $ kubectx --allow-exec minikube
 # allow writes to specific resources
 $ kubectx --allow-write=configmaps,apps/deployments minikube
 
-# restrict mutations to specific namespaces (reads unaffected)
+# restrict mutations to specific namespaces (reads unaffected;
+# cluster-scoped writes also blocked while an allowlist is set)
 $ kubectx -n dev,staging --allow-write=configmaps minikube
 
 # use a named preset
