@@ -41,11 +41,18 @@ func parseArgs(argv []string) Op {
 		return ListOp{}
 	}
 
-	if argv[0] == "--readonly" || argv[0] == "-r" {
-		target, flags, err := parseReadonlyFlags(argv[1:])
+	// Any of these at argv[0] triggers policy-shell mode. `-r`/`--readonly`
+	// is kept as a back-compat alias for `--mode=strict`.
+	if isPolicyTrigger(argv[0]) {
+		rest := argv
+		trigger := argv[0]
+		if trigger == "-r" || trigger == "--readonly" {
+			rest = argv[1:]
+		}
+		target, flags, err := parseReadonlyFlags(rest)
 		if err != nil {
 			if errors.Is(err, errTooManyReadonlyArgs) {
-				return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", argv[0])}
+				return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", trigger)}
 			}
 			return UnsupportedOp{Err: err}
 		}
@@ -53,7 +60,7 @@ func parseArgs(argv []string) Op {
 			if cmdutil.IsInteractiveMode(os.Stdout) {
 				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0], PolicyFlags: flags}
 			}
-			return UnsupportedOp{Err: fmt.Errorf("'%s' requires a context name argument (or fzf for interactive mode)", argv[0])}
+			return UnsupportedOp{Err: fmt.Errorf("'%s' requires a context name argument (or fzf for interactive mode)", trigger)}
 		}
 		return ReadonlyShellOp{Target: target, PolicyFlags: flags}
 	}

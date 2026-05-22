@@ -12,6 +12,22 @@ import (
 // the literal "-r"/"--readonly" in the message.
 var errTooManyReadonlyArgs = errors.New("too many context arguments")
 
+// isPolicyTrigger reports whether arg, when it appears at argv[0], should
+// route the command into policy-shell mode. `-r`/`--readonly` is the
+// back-compat alias for `--mode=strict`; the others let callers skip `-r`
+// entirely (`kubectx --policy=ro.yaml prod`).
+func isPolicyTrigger(arg string) bool {
+	if arg == "-r" || arg == "--readonly" {
+		return true
+	}
+	key, _, _ := strings.Cut(arg, "=")
+	switch key {
+	case "--mode", "--policy", "--allow-write", "--namespace", "-n", "--allow-exec":
+		return true
+	}
+	return false
+}
+
 // buildPolicy assembles a *proxy.Policy from the CLI flags. Precedence:
 //
 //  1. start from --mode preset (default "strict")

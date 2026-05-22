@@ -5,6 +5,28 @@ import (
 	"testing"
 )
 
+func TestIsPolicyTrigger(t *testing.T) {
+	yes := []string{
+		"-r", "--readonly",
+		"--mode", "--mode=relaxed",
+		"--policy", "--policy=ro.yaml",
+		"--allow-write", "--allow-write=configmaps",
+		"--namespace", "-n", "--namespace=dev",
+		"--allow-exec",
+	}
+	no := []string{"-s", "-d", "prod", "--help", "-h", "--shell", "ctx-name", "-c"}
+	for _, a := range yes {
+		if !isPolicyTrigger(a) {
+			t.Errorf("isPolicyTrigger(%q) = false, want true", a)
+		}
+	}
+	for _, a := range no {
+		if isPolicyTrigger(a) {
+			t.Errorf("isPolicyTrigger(%q) = true, want false", a)
+		}
+	}
+}
+
 func TestParseReadonlyFlags(t *testing.T) {
 	tests := []struct {
 		name       string
