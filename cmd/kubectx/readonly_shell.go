@@ -58,8 +58,12 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 	badgeColor := color.New(color.BgYellow, color.FgBlack, color.Bold)
 	printer.EnableOrDisableColor(badgeColor)
 
+	// The "READONLY SHELL" badge only applies when no writes or upgrades
+	// are permitted. Any layered flag (--allow-exec, --allow-write) trips
+	// the broader "POLICY SHELL" wording so users see at a glance that the
+	// shell isn't a true readonly.
 	badgeLabel := "POLICY SHELL: " + policy.Name
-	if policy.Name == "strict" {
+	if !policy.AllowUpgrade && len(policy.AllowWriteResources) == 0 {
 		badgeLabel = "READONLY SHELL"
 	}
 

@@ -57,8 +57,10 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 		return proxy.Policy{}, err
 	}
 
+	var mods []string
 	if f.AllowExec {
 		p.AllowUpgrade = true
+		mods = append(mods, "exec")
 	}
 	if len(f.AllowWrite) > 0 {
 		extra, err := proxy.ParseResourceRules(f.AllowWrite)
@@ -66,9 +68,16 @@ func (f ReadonlyPolicyFlags) buildPolicy() (proxy.Policy, error) {
 			return proxy.Policy{}, fmt.Errorf("--allow-write: %w", err)
 		}
 		p.AllowWriteResources = append(p.AllowWriteResources, extra...)
+		mods = append(mods, "writes")
 	}
 	if len(f.Namespaces) > 0 {
 		p.Namespaces = append(p.Namespaces, f.Namespaces...)
+		mods = append(mods, "ns")
+	}
+	if len(mods) > 0 {
+		// Reflect customization in the policy name so the banner doesn't
+		// say "strict" when exec or writes have been layered in.
+		p.Name = p.Name + "+" + strings.Join(mods, ",")
 	}
 	return p, nil
 }

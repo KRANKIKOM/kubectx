@@ -106,7 +106,7 @@ func TestBuildPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := proxy.Policy{
-			Name:         "relaxed",
+			Name:         "relaxed+exec,writes,ns",
 			AllowUpgrade: true,
 			AllowWriteResources: []proxy.ResourceRule{
 				{Resource: "configmaps"},
@@ -119,6 +119,19 @@ func TestBuildPolicy(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("buildPolicy() = %+v\nwant %+v", got, want)
+		}
+	})
+
+	t.Run("allow-exec alone renames strict to strict+exec", func(t *testing.T) {
+		got, err := ReadonlyPolicyFlags{AllowExec: true}.buildPolicy()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Name != "strict+exec" {
+			t.Errorf("expected name strict+exec, got %q", got.Name)
+		}
+		if !got.AllowUpgrade {
+			t.Error("expected AllowUpgrade=true")
 		}
 	})
 
