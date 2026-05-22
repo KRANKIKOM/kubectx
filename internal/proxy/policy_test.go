@@ -14,6 +14,8 @@ func TestParseAPIPath(t *testing.T) {
 		{"/api/v1/pods", APIPath{Version: "v1", Resource: "pods"}},
 		{"/api/v1/pods/", APIPath{Version: "v1", Resource: "pods"}},
 		{"/api/v1/namespaces/foo", APIPath{Version: "v1", Resource: "namespaces", Name: "foo"}},
+		{"/api/v1/namespaces/foo/status", APIPath{Version: "v1", Resource: "namespaces", Name: "foo", Subresource: "status"}},
+		{"/api/v1/namespaces/foo/finalize", APIPath{Version: "v1", Resource: "namespaces", Name: "foo", Subresource: "finalize"}},
 		{"/api/v1/namespaces/foo/pods", APIPath{Version: "v1", Namespace: "foo", Resource: "pods"}},
 		{"/api/v1/namespaces/foo/pods/bar", APIPath{Version: "v1", Namespace: "foo", Resource: "pods", Name: "bar"}},
 		{"/api/v1/namespaces/foo/pods/bar/log", APIPath{Version: "v1", Namespace: "foo", Resource: "pods", Name: "bar", Subresource: "log"}},

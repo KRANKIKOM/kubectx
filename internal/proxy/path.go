@@ -60,10 +60,18 @@ func parseAPIPath(path string) APIPath {
 
 	if len(rest) >= 2 && rest[0] == "namespaces" {
 		// `/namespaces/<name>` alone is a request targeting that namespace
-		// as a resource (cluster-scoped); deeper paths are namespace-scoped.
+		// as a resource (cluster-scoped). `/namespaces/<name>/{status,finalize}`
+		// are namespace subresources, not namespaced sub-paths. Anything
+		// else (`/namespaces/<name>/pods/...`) is namespace-scoped.
 		if len(rest) == 2 {
 			p.Resource = "namespaces"
 			p.Name = rest[1]
+			return p
+		}
+		if len(rest) == 3 && isNamespaceSubresource(rest[2]) {
+			p.Resource = "namespaces"
+			p.Name = rest[1]
+			p.Subresource = rest[2]
 			return p
 		}
 		p.Namespace = rest[1]
@@ -80,4 +88,10 @@ func parseAPIPath(path string) APIPath {
 		p.Subresource = rest[2]
 	}
 	return p
+}
+
+// isNamespaceSubresource reports whether s is a known subresource of
+// the core `namespaces` resource.
+func isNamespaceSubresource(s string) bool {
+	return s == "status" || s == "finalize"
 }
