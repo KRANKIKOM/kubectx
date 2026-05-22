@@ -115,7 +115,17 @@ func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags
 			}
 			flags.Namespaces = append(flags.Namespaces, splitCSV(v)...)
 		case "--allow-exec":
-			flags.AllowExec = true
+			if hasEq {
+				if val == "false" || val == "0" {
+					flags.AllowExec = false
+				} else if val == "true" || val == "1" {
+					flags.AllowExec = true
+				} else {
+					return "", flags, fmt.Errorf("--allow-exec value must be true/false, got %q", val)
+				}
+			} else {
+				flags.AllowExec = true
+			}
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return "", flags, fmt.Errorf("unknown flag for -r: %s", arg)

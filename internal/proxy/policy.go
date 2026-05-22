@@ -34,6 +34,12 @@ func (p *Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		if !p.AllowUpgrade {
 			return "exec/cp/port-forward are not allowed (policy " + p.Name + ")", false
 		}
+		if len(p.Namespaces) > 0 {
+			info := parseAPIPath(r.URL.Path)
+			if info.Namespace != "" && !contains(p.Namespaces, info.Namespace) {
+				return fmt.Sprintf("namespace %q not in policy allowlist", info.Namespace), false
+			}
+		}
 		return "", true
 	}
 	if isReadOnly(r) {
