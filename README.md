@@ -51,6 +51,37 @@ Start a read-only shell where write operations are blocked:
 $ kubectx -r minikube
 ```
 
+For finer-grained control, `-r` accepts policy flags:
+
+```sh
+# allow exec/cp/port-forward but still block mutations
+$ kubectx -r minikube --allow-exec
+
+# allow writes to specific resources
+$ kubectx -r minikube --allow-write=configmaps,apps/deployments
+
+# restrict mutations to specific namespaces (reads unaffected)
+$ kubectx -r minikube -n dev,staging --allow-write=configmaps
+
+# use a named preset
+$ kubectx -r minikube --mode=relaxed   # adds exec + common writes
+$ kubectx -r minikube --mode=debug     # everything allowed
+
+# load a YAML policy from disk
+$ kubectx -r minikube --policy=./readonly.yaml
+```
+
+Policy file format:
+
+```yaml
+name: dev-debug
+allowUpgrade: true
+namespaces: [dev, staging]
+allowWriteResources:
+  - configmaps
+  - apps/deployments
+```
+
 Rename context:
 
 ```sh

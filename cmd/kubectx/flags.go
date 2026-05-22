@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,16 +42,20 @@ func parseArgs(argv []string) Op {
 	}
 
 	if argv[0] == "--readonly" || argv[0] == "-r" {
-		if len(argv) == 1 {
+		target, flags, err := parseReadonlyFlags(argv[1:])
+		if err != nil {
+			if errors.Is(err, errTooManyReadonlyArgs) {
+				return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", argv[0])}
+			}
+			return UnsupportedOp{Err: err}
+		}
+		if target == "" {
 			if cmdutil.IsInteractiveMode(os.Stdout) {
-				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0]}
+				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0], PolicyFlags: flags}
 			}
 			return UnsupportedOp{Err: fmt.Errorf("'%s' requires a context name argument (or fzf for interactive mode)", argv[0])}
 		}
-		if len(argv) == 2 {
-			return ReadonlyShellOp{Target: argv[1]}
-		}
-		return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", argv[0])}
+		return ReadonlyShellOp{Target: target, PolicyFlags: flags}
 	}
 
 	if argv[0] == "--shell" || argv[0] == "-s" {

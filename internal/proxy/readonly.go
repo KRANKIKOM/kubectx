@@ -53,11 +53,13 @@ type ReadonlyProxy struct {
 type Config struct {
 	KubeconfigPath string
 	ContextName    string
+	// Policy describes which requests to allow. nil means strict default.
+	Policy *Policy
 }
 
 // Start creates and starts a readonly reverse proxy on a random localhost port.
-// The proxy loads TLS/auth config from the kubeconfig and forwards only
-// GET, HEAD, and OPTIONS requests (without protocol upgrades) to the real API server.
+// The proxy loads TLS/auth config from the kubeconfig and forwards requests
+// to the real API server according to cfg.Policy (or the strict default).
 func Start(cfg Config) (*ReadonlyProxy, error) {
 	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: cfg.KubeconfigPath}
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: cfg.ContextName}
@@ -78,7 +80,11 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	handler := NewHandler(targetURL, transport)
+	policy := cfg.Policy
+	if policy == nil {
+		policy = PresetStrict()
+	}
+	handler := NewHandlerWithPolicy(targetURL, transport, policy)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -107,9 +113,20 @@ func (p *ReadonlyProxy) Shutdown(ctx context.Context) error {
 	return p.server.Shutdown(ctx)
 }
 
-// NewHandler creates the readonly proxy HTTP handler.
+// NewHandler creates the readonly proxy HTTP handler with the strict default policy.
 // Exported for testing with a fake backend.
 func NewHandler(target *url.URL, transport http.RoundTripper) http.Handler {
+	return NewHandlerWithPolicy(target, transport, PresetStrict())
+}
+
+// checkRequest preserves the historical strict-default decision function for
+// tests that exercise it directly. New code should use Policy.Decide.
+func checkRequest(r *http.Request) (reason string, allowed bool) {
+	return PresetStrict().Decide(r)
+}
+
+// NewHandlerWithPolicy creates the readonly proxy HTTP handler using the given policy.
+func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy *Policy) http.Handler {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Transport = transport
 	proxy.FlushInterval = -1 // flush immediately for streaming (logs -f, watches)
@@ -117,7 +134,7 @@ func NewHandler(target *url.URL, transport http.RoundTripper) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		debugLog.Printf(">> %s %s", r.Method, r.URL.Path)
 
-		if reason, ok := checkRequest(r); !ok {
+		if reason, ok := policy.Decide(r); !ok {
 			debugLog.Printf("<< %s %s -> 405 (%s)", r.Method, r.URL.Path, reason)
 			writeBlockedResponse(w, r.Method,
 				fmt.Sprintf("[kubectx] readonly mode: %s", reason))
@@ -127,24 +144,6 @@ func NewHandler(target *url.URL, transport http.RoundTripper) http.Handler {
 		debugLog.Printf("<< %s %s -> proxied", r.Method, r.URL.Path)
 		proxy.ServeHTTP(w, r)
 	})
-}
-
-// checkRequest determines whether a request should be proxied or blocked.
-// Returns ("", true) if allowed, or (reason, false) if blocked.
-func checkRequest(r *http.Request) (reason string, allowed bool) {
-	if isUpgrade(r) {
-		return "operations like exec, cp, and port-forward are not allowed", false
-	}
-	if isReadOnly(r) {
-		return "", true
-	}
-	if isNonMutatingPost(r) {
-		return "", true
-	}
-	if isDryRun(r) {
-		return "", true
-	}
-	return fmt.Sprintf("%s requests are not allowed", r.Method), false
 }
 
 // isUpgrade returns true if the request is a protocol upgrade (SPDY/WebSocket).

@@ -16,12 +16,24 @@ import (
 
 // InteractiveReadonlyShellOp launches fzf to pick a context, then starts a readonly shell.
 type InteractiveReadonlyShellOp struct {
-	SelfCmd string
+	SelfCmd     string
+	PolicyFlags ReadonlyPolicyFlags
 }
 
 // ReadonlyShellOp starts a read-only sub-shell for a context.
 type ReadonlyShellOp struct {
-	Target string
+	Target      string
+	PolicyFlags ReadonlyPolicyFlags
+}
+
+// ReadonlyPolicyFlags captures the policy-shaping flags accepted by `-r`.
+// All fields are optional; the zero value means "use the strict default".
+type ReadonlyPolicyFlags struct {
+	Mode       string   // --mode=strict|relaxed|debug
+	PolicyFile string   // --policy=path/to/file.yaml
+	AllowWrite []string // --allow-write=configmaps,apps/deployments
+	Namespaces []string // --namespace=dev,staging
+	AllowExec  bool     // --allow-exec
 }
 
 func (op InteractiveReadonlyShellOp) Run(_, stderr io.Writer) error {
@@ -29,10 +41,14 @@ func (op InteractiveReadonlyShellOp) Run(_, stderr io.Writer) error {
 	if err != nil || choice == "" {
 		return err
 	}
-	return ReadonlyShellOp{Target: choice}.Run(nil, stderr)
+	return ReadonlyShellOp{Target: choice, PolicyFlags: op.PolicyFlags}.Run(nil, stderr)
 }
 
 func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
+	policy, err := op.PolicyFlags.buildPolicy()
+	if err != nil {
+		return err
+	}
 	badgeColor := color.New(color.BgYellow, color.FgBlack, color.Bold)
 	printer.EnableOrDisableColor(badgeColor)
 
@@ -66,6 +82,7 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 			p, err := proxy.Start(proxy.Config{
 				KubeconfigPath: origPath,
 				ContextName:    op.Target,
+				Policy:         policy,
 			})
 			if err != nil {
 				os.Remove(origPath)
