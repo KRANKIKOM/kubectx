@@ -54,7 +54,7 @@ func resolveKubectl() (string, error) {
 	}
 	path, err := exec.LookPath("kubectl")
 	if err != nil {
-		return "", fmt.Errorf("kubectl is required for --shell but was not found in PATH")
+		return "", fmt.Errorf("kubectl is required but was not found in PATH (set $KUBECTL to override)")
 	}
 	return path, nil
 }

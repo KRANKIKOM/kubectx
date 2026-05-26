@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,15 @@ func (op UnsupportedOp) Run(_, _ io.Writer) error {
 	return op.Err
 }
 
+// triggerLabel strips =value from a flag so error messages quote the flag
+// alone (`'--mode' accepts ...`) rather than echoing the user's value.
+func triggerLabel(arg string) string {
+	if i := strings.Index(arg, "="); i >= 0 {
+		return arg[:i]
+	}
+	return arg
+}
+
 // parseArgs looks at flags (excl. executable name, i.e. argv[0])
 // and decides which operation should be taken.
 func parseArgs(argv []string) Op {
@@ -40,17 +50,38 @@ func parseArgs(argv []string) Op {
 		return ListOp{}
 	}
 
-	if argv[0] == "--readonly" || argv[0] == "-r" {
-		if len(argv) == 1 {
-			if cmdutil.IsInteractiveMode(os.Stdout) {
-				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0]}
+	// Any of these at argv[0] triggers policy-shell mode. `-r`/`--readonly`
+	// keeps the original entry point so existing invocations get the strict
+	// default; the others let callers enter policy-shell mode without `-r`.
+	if isPolicyTrigger(argv[0]) {
+		rest := argv
+		trigger := triggerLabel(argv[0])
+		if argv[0] == "-r" || argv[0] == "--readonly" {
+			rest = argv[1:]
+		}
+		target, flags, err := parseReadonlyFlags(rest)
+		if err != nil {
+			if errors.Is(err, errTooManyReadonlyArgs) {
+				return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", trigger)}
 			}
-			return UnsupportedOp{Err: fmt.Errorf("'%s' requires a context name argument (or fzf for interactive mode)", argv[0])}
+			return UnsupportedOp{Err: err}
 		}
-		if len(argv) == 2 {
-			return ReadonlyShellOp{Target: argv[1]}
+		if flags.Serve {
+			if target == "" {
+				return UnsupportedOp{Err: fmt.Errorf("--serve requires a context name argument")}
+			}
+			return flags.serveOp(target)
 		}
-		return UnsupportedOp{Err: fmt.Errorf("'%s' accepts at most one context name argument", argv[0])}
+		if flags.hasServeOnlyFlag() {
+			return UnsupportedOp{Err: fmt.Errorf("--listen/--advertise/--kubeconfig-out/--no-tls require --serve (add --serve to enable daemon mode)")}
+		}
+		if target == "" {
+			if cmdutil.IsInteractiveMode(os.Stdout) {
+				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0], PolicyFlags: flags}
+			}
+			return UnsupportedOp{Err: fmt.Errorf("'%s' requires a context name argument (or fzf for interactive mode)", trigger)}
+		}
+		return ReadonlyShellOp{Target: target, PolicyFlags: flags}
 	}
 
 	if argv[0] == "--shell" || argv[0] == "-s" {

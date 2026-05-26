@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
@@ -47,17 +49,40 @@ func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 type ReadonlyProxy struct {
 	server   *http.Server
 	listener net.Listener
+	// err holds the first non-ErrServerClosed error from the serve
+	// goroutine, if any. Stored via atomic.Pointer so Err() is safe to
+	// call concurrently and idempotently (matching context.Err's
+	// semantics: once non-nil, stays non-nil).
+	err atomic.Pointer[error]
 }
 
 // Config holds information needed to start the readonly proxy.
 type Config struct {
 	KubeconfigPath string
 	ContextName    string
+	// Policy describes which requests to allow. The zero value is
+	// equivalent to PresetStrict.
+	Policy Policy
+	// ListenAddr controls where the listener binds, e.g. "0.0.0.0:8443".
+	// Empty defaults to "127.0.0.1:0" (loopback, ephemeral port).
+	ListenAddr string
+	// TLS, when set, makes the proxy serve HTTPS using the provided
+	// certificate. Start enforces TLS != nil when ListenAddr is non-loopback.
+	TLS *ServerTLS
+	// AuthToken, when set, requires `Authorization: Bearer <token>` on
+	// every request. Start enforces AuthToken != "" when ListenAddr is
+	// non-loopback. The header is stripped before the request is forwarded
+	// upstream so the sandbox token never reaches the apiserver.
+	AuthToken string
 }
 
-// Start creates and starts a readonly reverse proxy on a random localhost port.
-// The proxy loads TLS/auth config from the kubeconfig and forwards only
-// GET, HEAD, and OPTIONS requests (without protocol upgrades) to the real API server.
+// Start creates and starts a policy-enforcing reverse proxy. Binds to
+// cfg.ListenAddr (default "127.0.0.1:0"), forwards allowed requests to
+// the real apiserver after loading upstream TLS/auth from the kubeconfig.
+//
+// Optional cfg.TLS and cfg.AuthToken add transport security and bearer-
+// token authentication for cross-sandbox use. Non-loopback listeners
+// require both (defense-in-depth check below).
 func Start(cfg Config) (*ReadonlyProxy, error) {
 	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: cfg.KubeconfigPath}
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: cfg.ContextName}
@@ -78,22 +103,71 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	handler := NewHandler(targetURL, transport)
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("failed to listen: %w", err)
+	listenAddr := cfg.ListenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
 	}
 
-	srv := &http.Server{Handler: handler}
-	go srv.Serve(listener)
+	// Defense-in-depth: refuse to expose an unauthenticated or plaintext
+	// listener on anything other than loopback. The CLI layer enforces
+	// this too, but keeping the invariant in the proxy package means any
+	// future caller gets the same guarantee.
+	if host, _, _ := net.SplitHostPort(listenAddr); !HostIsLoopback(host) {
+		if cfg.TLS == nil {
+			return nil, fmt.Errorf("proxy.Start: non-loopback listen %q requires TLS", listenAddr)
+		}
+		if cfg.AuthToken == "" {
+			return nil, fmt.Errorf("proxy.Start: non-loopback listen %q requires AuthToken", listenAddr)
+		}
+	}
+
+	var handler http.Handler = NewHandlerWithPolicy(targetURL, transport, cfg.Policy)
+	if cfg.AuthToken != "" {
+		handler = withTokenAuth(cfg.AuthToken, handler)
+	}
+
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
+	}
+
+	// Surface server errors loudly. A dead proxy means kubectl gets
+	// ECONNREFUSED with no context — the user's prompt still shows the
+	// "readonly shell" badge while no enforcement is happening.
+	stderrLog := log.New(os.Stderr, "[kubectx readonly-proxy] ", log.Ltime)
+	srv := &http.Server{Handler: handler, ErrorLog: stderrLog}
+	if cfg.TLS != nil {
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cfg.TLS.Cert}}
+	}
+	p := &ReadonlyProxy{server: srv, listener: listener}
+	go func() {
+		defer listener.Close()
+		var err error
+		if cfg.TLS != nil {
+			err = srv.ServeTLS(listener, "", "")
+		} else {
+			err = srv.Serve(listener)
+		}
+		if err != nil && err != http.ErrServerClosed {
+			stderrLog.Printf("server died: %v", err)
+			p.err.Store(&err)
+		}
+	}()
 
 	debugLog.Printf("started on %s, proxying to %s", listener.Addr(), targetURL)
 
-	return &ReadonlyProxy{
-		server:   srv,
-		listener: listener,
-	}, nil
+	return p, nil
+}
+
+// Err returns a non-nil error if the serve goroutine has terminated with
+// anything other than the expected Shutdown sentinel. Idempotent: once
+// non-nil, stays non-nil across calls. Returns nil while the proxy is
+// still serving (or after a clean shutdown).
+func (p *ReadonlyProxy) Err() error {
+	if e := p.err.Load(); e != nil {
+		return *e
+	}
+	return nil
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:54321").
@@ -107,17 +181,29 @@ func (p *ReadonlyProxy) Shutdown(ctx context.Context) error {
 	return p.server.Shutdown(ctx)
 }
 
-// NewHandler creates the readonly proxy HTTP handler.
+// NewHandler creates the readonly proxy HTTP handler with the strict default policy.
 // Exported for testing with a fake backend.
 func NewHandler(target *url.URL, transport http.RoundTripper) http.Handler {
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = transport
-	proxy.FlushInterval = -1 // flush immediately for streaming (logs -f, watches)
+	return NewHandlerWithPolicy(target, transport, PresetStrict())
+}
+
+// checkRequest preserves the historical strict-default decision function for
+// tests that exercise it directly. New code should use Policy.Decide.
+func checkRequest(r *http.Request) (reason string, allowed bool) {
+	return PresetStrict().Decide(r)
+}
+
+// NewHandlerWithPolicy creates the readonly proxy HTTP handler using the given policy.
+func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy Policy) http.Handler {
+	rp := httputil.NewSingleHostReverseProxy(target)
+	rp.Transport = transport
+	rp.FlushInterval = -1 // flush immediately for streaming (logs -f, watches)
+	rp.ErrorLog = debugLog
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		debugLog.Printf(">> %s %s", r.Method, r.URL.Path)
 
-		if reason, ok := checkRequest(r); !ok {
+		if reason, ok := policy.Decide(r); !ok {
 			debugLog.Printf("<< %s %s -> 405 (%s)", r.Method, r.URL.Path, reason)
 			writeBlockedResponse(w, r.Method,
 				fmt.Sprintf("[kubectx] readonly mode: %s", reason))
@@ -125,31 +211,39 @@ func NewHandler(target *url.URL, transport http.RoundTripper) http.Handler {
 		}
 
 		debugLog.Printf("<< %s %s -> proxied", r.Method, r.URL.Path)
-		proxy.ServeHTTP(w, r)
+		rp.ServeHTTP(w, r)
 	})
 }
 
-// checkRequest determines whether a request should be proxied or blocked.
-// Returns ("", true) if allowed, or (reason, false) if blocked.
-func checkRequest(r *http.Request) (reason string, allowed bool) {
-	if isUpgrade(r) {
-		return "operations like exec, cp, and port-forward are not allowed", false
+// HostIsLoopback reports whether a host literal (no port) is a loopback
+// address. Empty / 0.0.0.0 / non-loopback DNS names all return false.
+// Exported so cmd-side flag validation shares the same definition.
+func HostIsLoopback(host string) bool {
+	if host == "" {
+		return false
 	}
-	if isReadOnly(r) {
-		return "", true
+	if strings.EqualFold(host, "localhost") {
+		return true
 	}
-	if isNonMutatingPost(r) {
-		return "", true
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
 	}
-	if isDryRun(r) {
-		return "", true
-	}
-	return fmt.Sprintf("%s requests are not allowed", r.Method), false
+	return false
 }
 
 // isUpgrade returns true if the request is a protocol upgrade (SPDY/WebSocket).
+// Tokenizes the Connection header so values like "keep-alive, Upgrade" are
+// recognized.
 func isUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Connection"), "Upgrade") || r.Header.Get("Upgrade") != ""
+	if r.Header.Get("Upgrade") != "" {
+		return true
+	}
+	for _, tok := range strings.Split(r.Header.Get("Connection"), ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "Upgrade") {
+			return true
+		}
+	}
+	return false
 }
 
 // isReadOnly returns true for safe HTTP methods that never modify state.

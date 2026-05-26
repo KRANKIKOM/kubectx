@@ -157,10 +157,11 @@ func TestJailbreak_UpgradeSmuggling(t *testing.T) {
 			map[string]string{"Connection": "keep-alive, Upgrade", "Upgrade": "SPDY/3.1"}, false,
 			// Has Upgrade header set so isUpgrade catches it via second check
 		},
-		// Empty upgrade header
+		// Empty Upgrade header — isUpgrade is false, so this is just a
+		// safe GET and the apiserver will return 400 on its own. Allowed
+		// (matches original `-r` behavior).
 		{"empty Upgrade header", http.MethodGet, "/api/v1/pods/x/exec",
 			map[string]string{"Upgrade": ""}, true,
-			// Empty string != "" is false, so this passes through
 		},
 	}
 
