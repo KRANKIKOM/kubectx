@@ -26,6 +26,14 @@ func GenerateToken() (string, error) {
 // `Authorization: Bearer <token>`. A missing or mismatched token returns
 // 401 with a metav1.Status body, so kubectl renders a clean error.
 //
+// On success the Authorization header is removed before the request
+// reaches next. This matters for two reasons:
+//   - the upstream apiserver should never see the sandbox's bearer token
+//     (it would otherwise show up in audit logs)
+//   - client-go's BearerAuthRoundTripper *skips* injecting the cluster
+//     credential when Authorization is already set, so leaving the
+//     sandbox token in place would silently break bearer-auth clusters
+//
 // The comparison uses subtle.ConstantTimeCompare to avoid leaking the
 // token via response timing.
 func withTokenAuth(token string, next http.Handler) http.Handler {
@@ -37,11 +45,18 @@ func withTokenAuth(token string, next http.Handler) http.Handler {
 			writeUnauthorized(w, "missing bearer token")
 			return
 		}
-		got := []byte(strings.TrimSpace(auth[len(prefix):]))
+		// Only strip leading whitespace from the candidate token. Trailing
+		// whitespace isn't part of any legitimate bearer token grammar and
+		// permitting it would broaden the equality definition for no gain.
+		got := []byte(strings.TrimLeft(auth[len(prefix):], " \t"))
 		if len(got) != len(expected) || subtle.ConstantTimeCompare(got, expected) != 1 {
 			writeUnauthorized(w, "invalid bearer token")
 			return
 		}
+		// Authenticated: strip the header so the upstream apiserver never
+		// sees it and client-go's transport can inject the real cluster
+		// credential.
+		r.Header.Del("Authorization")
 		next.ServeHTTP(w, r)
 	})
 }

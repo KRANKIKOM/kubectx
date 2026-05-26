@@ -23,8 +23,11 @@ func TestWithTokenAuth(t *testing.T) {
 		{"wrong scheme", "Basic " + token, http.StatusUnauthorized},
 		{"wrong token", "Bearer wrong", http.StatusUnauthorized},
 		{"shorter prefix", "Bearer " + token[:5], http.StatusUnauthorized},
+		{"longer suffix", "Bearer " + token + "x", http.StatusUnauthorized},
+		{"empty token after prefix", "Bearer ", http.StatusUnauthorized},
 		{"correct", "Bearer " + token, http.StatusOK},
-		{"trailing whitespace tolerated", "Bearer " + token + "  ", http.StatusOK},
+		{"leading whitespace tolerated", "Bearer  " + token, http.StatusOK},
+		{"trailing whitespace rejected", "Bearer " + token + "  ", http.StatusUnauthorized},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -38,6 +41,26 @@ func TestWithTokenAuth(t *testing.T) {
 				t.Errorf("status = %d, want %d (body=%s)", rr.Code, tt.wantStatus, rr.Body.String())
 			}
 		})
+	}
+}
+
+func TestWithTokenAuth_StripsAuthorizationHeader(t *testing.T) {
+	const token = "the-sandbox-token"
+	var sawAuth string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	r := httptest.NewRequest("GET", "/api/v1/pods", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	withTokenAuth(token, next).ServeHTTP(rr, r)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d", rr.Code)
+	}
+	if sawAuth != "" {
+		t.Errorf("upstream saw Authorization=%q; should have been stripped", sawAuth)
 	}
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -21,13 +23,13 @@ import (
 //
 // Unlike ReadonlyShellOp, ServeOp does not spawn a subshell. It writes
 // a sandbox-facing kubeconfig and blocks until SIGINT/SIGTERM.
+//
+// The serve-mode flags (--listen, --advertise, --kubeconfig-out,
+// --no-tls) live on PolicyFlags alongside the policy-shaping flags;
+// ServeOp reads them through PolicyFlags so there is one source of truth.
 type ServeOp struct {
-	Target        string
-	PolicyFlags   ReadonlyPolicyFlags
-	Listen        string // bind address, e.g. "0.0.0.0:8443"
-	Advertise     string // host[:port] written into the sandbox kubeconfig
-	KubeconfigOut string // path to write the sandbox kubeconfig
-	NoTLS         bool   // disable TLS (only valid for loopback)
+	Target      string
+	PolicyFlags ReadonlyPolicyFlags
 }
 
 func (op ServeOp) Run(stdout, stderr io.Writer) error {
@@ -35,21 +37,26 @@ func (op ServeOp) Run(stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if op.KubeconfigOut == "" {
-		return fmt.Errorf("--kubeconfig-out is required for --serve")
+	flags := op.PolicyFlags
+	if flags.KubeconfigOut == "" {
+		return fmt.Errorf("--kubeconfig-out is required for --serve (path where the sandbox kubeconfig will be written)")
 	}
 
-	listen, err := resolveListenAddr(op.Listen)
+	// Resolve advertise first so we can pick a sensible default for listen.
+	// If the user is advertising a loopback hostname, default listen to
+	// 127.0.0.1 (more secure). Only fall back to 0.0.0.0 when advertise is
+	// explicitly non-loopback.
+	advertise, err := resolveAdvertise(flags.Advertise, flags.Listen)
 	if err != nil {
 		return err
 	}
-	advertise, err := resolveAdvertise(op.Advertise, listen)
+	listen, err := resolveListenAddr(flags.Listen, advertise)
 	if err != nil {
 		return err
 	}
-	useTLS := !op.NoTLS
-	if op.NoTLS && !isLoopback(advertise.Hostname()) {
-		return fmt.Errorf("--no-tls is only allowed when --advertise is loopback (got %q)", advertise.Hostname())
+	useTLS := !flags.NoTLS
+	if err := checkNoTLS(flags.NoTLS, listen, advertise); err != nil {
+		return err
 	}
 
 	// Write the original kubeconfig to a temp file the proxy can load
@@ -91,45 +98,105 @@ func (op ServeOp) Run(stdout, stderr io.Writer) error {
 		return fmt.Errorf("start proxy: %w", err)
 	}
 
-	if err := waitForProxy(p.Addr(), 2*time.Second); err != nil {
-		p.Shutdown(context.Background())
+	var tlsProbe *tls.Config
+	if tlsBundle != nil {
+		pool := x509.NewCertPool()
+		pool.AppendCertsFromPEM(tlsBundle.CAPEM)
+		tlsProbe = &tls.Config{RootCAs: pool, ServerName: advertise.Hostname()}
+	}
+	if err := waitForProxyHandshake(p.Addr(), 2*time.Second, tlsProbe); err != nil {
+		shutdown(p)
 		return fmt.Errorf("proxy did not become ready: %w", err)
 	}
 
 	// Emit the sandbox kubeconfig.
 	serverURL := scheme + "://" + advertise.Host
-	caPEM := []byte{}
+	var caPEM []byte
 	if tlsBundle != nil {
 		caPEM = tlsBundle.CAPEM
-	} else {
-		// Plaintext mode: the consumer doesn't need a CA, but the
-		// kubeconfig emitter requires non-empty input. Use a placeholder
-		// comment that won't be read because the URL is http://.
-		caPEM = []byte("# proxy runs without TLS; CA not used\n")
 	}
 	out, err := proxy.EmitSandboxKubeconfig(serverURL, op.Target, token, caPEM)
 	if err != nil {
-		p.Shutdown(context.Background())
+		shutdown(p)
 		return err
 	}
-	if err := os.WriteFile(op.KubeconfigOut, out, 0o600); err != nil {
-		p.Shutdown(context.Background())
-		return fmt.Errorf("write kubeconfig: %w", err)
+	if err := writeKubeconfigOut(flags.KubeconfigOut, out); err != nil {
+		shutdown(p)
+		return err
 	}
 
 	fmt.Fprintf(stderr, "[kubectx policy serve] policy=%q listen=%s advertise=%s tls=%v\n",
 		policy.Name, listen, advertise.Host, useTLS)
-	fmt.Fprintf(stderr, "[kubectx policy serve] sandbox kubeconfig written to %s\n", op.KubeconfigOut)
+	fmt.Fprintf(stderr, "[kubectx policy serve] sandbox kubeconfig written to %s\n", flags.KubeconfigOut)
 	fmt.Fprintf(stderr, "[kubectx policy serve] ready — press Ctrl-C to stop\n")
 
-	// Block on a signal so the proxy stays up for the agent.
+	// Block on a signal so the proxy stays up for the agent. Poll the
+	// serve goroutine's exit channel too, so a crashed proxy surfaces as
+	// a non-zero exit instead of a silently-dead daemon.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	<-sig
-	fmt.Fprintln(stderr, "[kubectx policy serve] shutting down")
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sig:
+			fmt.Fprintln(stderr, "[kubectx policy serve] shutting down")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return p.Shutdown(ctx)
+		case <-ticker.C:
+			if err := p.Err(); err != nil {
+				return fmt.Errorf("proxy died: %w", err)
+			}
+		}
+	}
+}
+
+// checkNoTLS enforces the safety constraint that --no-tls requires
+// BOTH the listen host AND the advertise host to be loopback. Either
+// alone is insufficient: listen=0.0.0.0 + advertise=localhost would
+// expose plaintext on the network, while listen=127.0.0.1 +
+// advertise=hostX makes the emitted kubeconfig unreachable.
+func checkNoTLS(noTLS bool, listen string, advertise *url.URL) error {
+	if !noTLS {
+		return nil
+	}
+	listenHost, _, _ := net.SplitHostPort(listen)
+	if !isLoopback(listenHost) {
+		return fmt.Errorf("--no-tls requires --listen to bind on loopback (got %q); the proxy would otherwise serve a bearer token in plaintext over the network", listenHost)
+	}
+	if !isLoopback(advertise.Hostname()) {
+		return fmt.Errorf("--no-tls is only allowed when --advertise is loopback (got %q)", advertise.Hostname())
+	}
+	return nil
+}
+
+// writeKubeconfigOut writes the emitted sandbox kubeconfig to path with
+// mode 0600. Unlike os.WriteFile, this explicitly chmods after writing so
+// a pre-existing file with looser permissions gets tightened to match the
+// fresh bearer-token-bearing contents.
+func writeKubeconfigOut(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open kubeconfig %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("write kubeconfig %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod kubeconfig %s: %w", path, err)
+	}
+	return nil
+}
+
+// shutdown stops the proxy with a bounded timeout. Failure-path callers
+// can't afford to block indefinitely on Shutdown if an upstream connection
+// is hung.
+func shutdown(p *proxy.ReadonlyProxy) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return p.Shutdown(ctx)
+	_ = p.Shutdown(ctx)
 }
 
 // writeOriginalKubeconfigForProxy minifies the current kubeconfig down to
@@ -154,13 +221,21 @@ func writeOriginalKubeconfigForProxy(target string) (string, func(), error) {
 	return path, func() { os.Remove(path) }, nil
 }
 
-func resolveListenAddr(listen string) (string, error) {
+func resolveListenAddr(listen string, advertise *url.URL) (string, error) {
 	if listen == "" {
-		// Default to all interfaces so the sandbox bridge can reach it.
-		return "0.0.0.0:0", nil
+		// Default to 0.0.0.0 only when advertise is non-loopback (the user
+		// wants to be reachable from another network namespace). For
+		// loopback advertise, stay on 127.0.0.1 — same blast radius as
+		// the legacy `-r` shell mode.
+		host := "127.0.0.1"
+		if !isLoopback(advertise.Hostname()) {
+			host = "0.0.0.0"
+		}
+		_, port, _ := net.SplitHostPort(advertise.Host)
+		return net.JoinHostPort(host, port), nil
 	}
 	if _, _, err := net.SplitHostPort(listen); err != nil {
-		return "", fmt.Errorf("--listen %q: %w", listen, err)
+		return "", fmt.Errorf("--listen %q: %w (expected host:port, e.g. 0.0.0.0:8443)", listen, err)
 	}
 	return listen, nil
 }

@@ -48,6 +48,10 @@ func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 type ReadonlyProxy struct {
 	server   *http.Server
 	listener net.Listener
+	// serveErr carries the first non-ErrServerClosed error from the
+	// serve goroutine, if any. Buffered so the goroutine can send-and-exit
+	// without a receiver. Callers consult Err() to detect a crashed proxy.
+	serveErr chan error
 }
 
 // Config holds information needed to start the readonly proxy.
@@ -61,17 +65,22 @@ type Config struct {
 	// Empty defaults to "127.0.0.1:0" (loopback, ephemeral port).
 	ListenAddr string
 	// TLS, when set, makes the proxy serve HTTPS using the provided
-	// certificate. Required for cross-sandbox use; loopback can stay HTTP.
+	// certificate. Start enforces TLS != nil when ListenAddr is non-loopback.
 	TLS *ServerTLS
 	// AuthToken, when set, requires `Authorization: Bearer <token>` on
-	// every request. Required whenever the listener is reachable from
-	// anything other than loopback.
+	// every request. Start enforces AuthToken != "" when ListenAddr is
+	// non-loopback. The header is stripped before the request is forwarded
+	// upstream so the sandbox token never reaches the apiserver.
 	AuthToken string
 }
 
-// Start creates and starts a readonly reverse proxy on a random localhost port.
-// The proxy loads TLS/auth config from the kubeconfig and forwards requests
-// to the real API server according to cfg.Policy (or the strict default).
+// Start creates and starts a policy-enforcing reverse proxy. Binds to
+// cfg.ListenAddr (default "127.0.0.1:0"), forwards allowed requests to
+// the real apiserver after loading upstream TLS/auth from the kubeconfig.
+//
+// Optional cfg.TLS and cfg.AuthToken add transport security and bearer-
+// token authentication for cross-sandbox use. Non-loopback listeners
+// require both (defense-in-depth check below).
 func Start(cfg Config) (*ReadonlyProxy, error) {
 	loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: cfg.KubeconfigPath}
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: cfg.ContextName}
@@ -92,15 +101,29 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
+	listenAddr := cfg.ListenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+
+	// Defense-in-depth: refuse to expose an unauthenticated or plaintext
+	// listener on anything other than loopback. The CLI layer enforces
+	// this too, but keeping the invariant in the proxy package means any
+	// future caller gets the same guarantee.
+	if host, _, _ := net.SplitHostPort(listenAddr); !hostIsLoopback(host) {
+		if cfg.TLS == nil {
+			return nil, fmt.Errorf("proxy.Start: non-loopback listen %q requires TLS", listenAddr)
+		}
+		if cfg.AuthToken == "" {
+			return nil, fmt.Errorf("proxy.Start: non-loopback listen %q requires AuthToken", listenAddr)
+		}
+	}
+
 	var handler http.Handler = NewHandlerWithPolicy(targetURL, transport, cfg.Policy)
 	if cfg.AuthToken != "" {
 		handler = withTokenAuth(cfg.AuthToken, handler)
 	}
 
-	listenAddr := cfg.ListenAddr
-	if listenAddr == "" {
-		listenAddr = "127.0.0.1:0"
-	}
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
@@ -114,16 +137,20 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 	if cfg.TLS != nil {
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cfg.TLS.Cert}}
 	}
+	serveErr := make(chan error, 1)
 	go func() {
-		var serveErr error
+		defer listener.Close()
+		var err error
 		if cfg.TLS != nil {
-			serveErr = srv.ServeTLS(listener, "", "")
+			err = srv.ServeTLS(listener, "", "")
 		} else {
-			serveErr = srv.Serve(listener)
+			err = srv.Serve(listener)
 		}
-		if serveErr != nil && serveErr != http.ErrServerClosed {
-			stderrLog.Printf("server died: %v", serveErr)
+		if err != nil && err != http.ErrServerClosed {
+			stderrLog.Printf("server died: %v", err)
+			serveErr <- err
 		}
+		close(serveErr)
 	}()
 
 	debugLog.Printf("started on %s, proxying to %s", listener.Addr(), targetURL)
@@ -131,7 +158,23 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 	return &ReadonlyProxy{
 		server:   srv,
 		listener: listener,
+		serveErr: serveErr,
 	}, nil
+}
+
+// Err returns a non-nil error if the serve goroutine has terminated with
+// anything other than the expected Shutdown sentinel. Returns nil while
+// the proxy is still serving (or after a clean shutdown).
+func (p *ReadonlyProxy) Err() error {
+	select {
+	case err, ok := <-p.serveErr:
+		if !ok {
+			return nil
+		}
+		return err
+	default:
+		return nil
+	}
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:54321").
@@ -177,6 +220,21 @@ func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy P
 		debugLog.Printf("<< %s %s -> proxied", r.Method, r.URL.Path)
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// hostIsLoopback reports whether a host literal (no port) is a loopback
+// address. Empty / 0.0.0.0 / non-loopback DNS names all return false.
+func hostIsLoopback(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // isUpgrade returns true if the request is a protocol upgrade (SPDY/WebSocket).

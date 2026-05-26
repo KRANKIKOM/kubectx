@@ -125,7 +125,9 @@ advertise values:
 | Sandbox runtime | --advertise |
 |---|---|
 | Docker Desktop (macOS/Windows) | `host.docker.internal:8443` |
-| Linux Docker default bridge | `172.17.0.1:8443` |
+| Linux Docker default bridge | `172.17.0.1:8443` (only on the default `bridge` network) |
+| Linux Docker user-defined bridge | start the container with `--add-host=host.docker.internal:host-gateway` and advertise that |
+| Linux Docker `--network=host` | `127.0.0.1:8443` |
 | Lima/Colima VM | gateway IP (often `192.168.5.2:8443`) |
 
 Rename context:

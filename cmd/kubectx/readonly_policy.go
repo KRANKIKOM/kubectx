@@ -88,17 +88,10 @@ func (f ReadonlyPolicyFlags) isZero() bool {
 		len(f.AllowWrite) == 0 && len(f.Namespaces) == 0 && !f.AllowExec
 }
 
-// serveOp builds a ServeOp from the parsed flags, asserting that flags
-// only meaningful for serve mode aren't accidentally set for shell mode.
+// serveOp builds a ServeOp from the parsed flags. ServeOp consumes the
+// serve-mode fields through PolicyFlags — no need to duplicate them here.
 func (f ReadonlyPolicyFlags) serveOp(target string) ServeOp {
-	return ServeOp{
-		Target:        target,
-		PolicyFlags:   f,
-		Listen:        f.Listen,
-		Advertise:     f.Advertise,
-		KubeconfigOut: f.KubeconfigOut,
-		NoTLS:         f.NoTLS,
-	}
+	return ServeOp{Target: target, PolicyFlags: f}
 }
 
 // hasServeOnlyFlag reports whether any of the serve-mode flags were set.

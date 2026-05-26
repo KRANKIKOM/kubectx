@@ -83,7 +83,16 @@ Set `DEBUG=1` (the env var is just `DEBUG`, not `KUBECTX_DEBUG`) to see proxy de
 - `proxy.GenerateToken` + `withTokenAuth` (`auth.go`) — 256-bit random bearer token, constant-time comparison on each request. Wraps the policy handler so authn runs before policy.
 - `proxy.EmitSandboxKubeconfig` (`kubeconfig_emit.go`) — builds the YAML the sandbox mounts.
 - `proxy.Config` gains `ListenAddr`, `TLS`, `AuthToken`. When TLS is set, `srv.ServeTLS` is used; when `AuthToken` is non-empty, the handler is wrapped with auth.
-- `ServeOp` (`cmd/kubectx/serve.go`) ties it together: builds policy, generates TLS+token, starts the proxy, writes the sandbox kubeconfig, blocks on SIGINT/SIGTERM.
+- `ServeOp` (`cmd/kubectx/serve.go`) ties it together. Order of operations:
+  1. `buildPolicy` from CLI flags
+  2. validate `--kubeconfig-out`, resolve `--advertise` and `--listen` (loopback advertise → loopback default listen)
+  3. `--no-tls` gate: refuse unless **both** listen host and advertise host are loopback
+  4. `writeOriginalKubeconfigForProxy` (shells out to `kubectl config view --minify --flatten` into a 0600 temp file)
+  5. `GenerateToken` + (when TLS) `GenerateSelfSignedTLS`
+  6. `proxy.Start` (its own defense-in-depth check rejects non-loopback bind without TLS+AuthToken)
+  7. `waitForProxyHandshake` — TCP for HTTP, full TLS handshake for HTTPS, so readiness reflects what the agent will actually do
+  8. `EmitSandboxKubeconfig` + `writeKubeconfigOut` (0600 forced on a pre-existing path)
+  9. block on signal; poll `proxy.Err()` for a crashed serve goroutine; graceful `Shutdown` on SIGINT/SIGTERM
 
 `--listen` (bind address) and `--advertise` (host:port written into the sandbox kubeconfig) are separate because the host and sandbox see different networks. `--no-tls` is only accepted when `--advertise` resolves to loopback.
 

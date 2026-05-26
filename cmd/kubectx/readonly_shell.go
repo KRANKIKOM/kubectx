@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -146,10 +147,24 @@ func (op ReadonlyShellOp) Run(_, stderr io.Writer) error {
 // waitForProxy blocks until the local proxy at addr accepts a TCP connection,
 // or until budget elapses.
 func waitForProxy(addr string, budget time.Duration) error {
+	return waitForProxyHandshake(addr, budget, nil)
+}
+
+// waitForProxyHandshake is like waitForProxy but when tlsConfig is non-nil
+// it also completes a TLS handshake — the kernel accept queue is open
+// well before ServeTLS has installed its handler, so a plain TCP probe
+// would lie about readiness for HTTPS daemons.
+func waitForProxyHandshake(addr string, budget time.Duration, tlsConfig *tls.Config) error {
 	deadline := time.Now().Add(budget)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		var conn net.Conn
+		var err error
+		if tlsConfig != nil {
+			conn, err = tls.Dial("tcp", addr, tlsConfig)
+		} else {
+			conn, err = net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		}
 		if err == nil {
 			conn.Close()
 			return nil

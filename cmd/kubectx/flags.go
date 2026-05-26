@@ -73,7 +73,7 @@ func parseArgs(argv []string) Op {
 			return flags.serveOp(target)
 		}
 		if flags.hasServeOnlyFlag() {
-			return UnsupportedOp{Err: fmt.Errorf("--listen/--advertise/--kubeconfig-out/--no-tls require --serve")}
+			return UnsupportedOp{Err: fmt.Errorf("--listen/--advertise/--kubeconfig-out/--no-tls require --serve (add --serve to enable daemon mode)")}
 		}
 		if target == "" {
 			if cmdutil.IsInteractiveMode(os.Stdout) {

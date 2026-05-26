@@ -40,17 +40,19 @@ func GenerateSelfSignedTLS(dnsNames []string, ips []net.IP) (ServerTLS, error) {
 	}
 
 	now := time.Now()
+	// Leaf certificate (not a CA). The sandbox kubeconfig embeds this
+	// cert as its trust anchor, but the key is only used to sign TLS
+	// handshakes — not to mint further certs. Keeping IsCA/CertSign off
+	// limits the blast radius if the private key leaks.
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "kubectx policy proxy"},
-		NotBefore:             now.Add(-1 * time.Minute),
-		NotAfter:              now.Add(365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:              dnsNames,
-		IPAddresses:           ips,
-		IsCA:                  true,
-		BasicConstraintsValid: true,
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "kubectx policy proxy"},
+		NotBefore:    now.Add(-1 * time.Minute),
+		NotAfter:     now.Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     dnsNames,
+		IPAddresses:  ips,
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
