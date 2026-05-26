@@ -199,10 +199,12 @@ func TestPolicy_Decide_UpgradeSubresources(t *testing.T) {
 		path         string
 		allowed      bool
 	}{
-		{"exec blocked when AllowUpgrade=false", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", false},
-		{"exec allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true},
-		{"attach allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/attach", true},
-		{"portforward allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/portforward", true},
+		// GET to upgrade subresource paths is allowed (matches original readonly proxy behavior)
+		{"exec GET allowed regardless of AllowUpgrade", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true},
+		{"exec POST blocked when AllowUpgrade=false", false, "POST", "/api/v1/namespaces/foo/pods/bar/exec", false},
+		{"exec POST allowed when AllowUpgrade=true", true, "POST", "/api/v1/namespaces/foo/pods/bar/exec", true},
+		{"attach POST allowed when AllowUpgrade=true", true, "POST", "/api/v1/namespaces/foo/pods/bar/attach", true},
+		{"portforward POST allowed when AllowUpgrade=true", true, "POST", "/api/v1/namespaces/foo/pods/bar/portforward", true},
 		// pods/proxy: a sneaky tunneling subresource. Treated like an upgrade.
 		{"proxy blocked when AllowUpgrade=false", false, "POST", "/api/v1/namespaces/foo/pods/bar/proxy", false},
 		{"proxy allowed when AllowUpgrade=true", true, "POST", "/api/v1/namespaces/foo/pods/bar/proxy", true},

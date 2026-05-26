@@ -157,10 +157,10 @@ func TestJailbreak_UpgradeSmuggling(t *testing.T) {
 			map[string]string{"Connection": "keep-alive, Upgrade", "Upgrade": "SPDY/3.1"}, false,
 			// Has Upgrade header set so isUpgrade catches it via second check
 		},
-		// Empty Upgrade header — but exec is an upgrade subresource, so
-		// blocked under strict regardless of headers.
+		// Empty Upgrade header is treated as no Upgrade header, so this is a
+		// plain GET to an exec path, which is allowed (matches original readonly proxy).
 		{"empty Upgrade header", http.MethodGet, "/api/v1/pods/x/exec",
-			map[string]string{"Upgrade": ""}, false,
+			map[string]string{"Upgrade": ""}, true,
 		},
 	}
 

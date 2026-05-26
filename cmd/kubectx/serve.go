@@ -185,7 +185,7 @@ func resolveAdvertise(advertise, listen string) (*url.URL, error) {
 	if host == "" {
 		return nil, fmt.Errorf("--advertise must include a hostname the sandbox can dial (got %q)", advertise)
 	}
-	if port == "0" {
+	if port == "0" || port == "" {
 		return nil, fmt.Errorf("--advertise must use a fixed port; pick one via --listen=host:PORT")
 	}
 	u := &url.URL{Host: net.JoinHostPort(host, port)}

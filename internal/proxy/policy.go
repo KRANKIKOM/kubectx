@@ -101,27 +101,34 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 	upgrade := isUpgrade(r)
 	_, isUpgradeSub := upgradeSubresources[info.Subresource]
 
-	// Upgrade subresources (exec/attach/portforward/proxy) are a special
-	// class: they require AllowUpgrade regardless of method, since they
+	// Upgrade header anywhere is suspect; block regardless of path/method.
+	// This preserves the original readonly proxy behavior and closes smuggling
+	// attacks where an Upgrade header on DELETE /pods/<n> would bypass policy.
+	if upgrade {
+		if isUpgradeSub {
+			// More specific message for upgrade subresource paths
+			return p.deny(fmt.Sprintf("protocol upgrade on %s subresource not allowed", info.Subresource)), false
+		}
+		return p.deny("protocol upgrade not permitted on this path"), false
+	}
+
+	// Safe methods (GET/HEAD/OPTIONS) are always allowed when there's no
+	// Upgrade header, matching the original readonly proxy behavior. This
+	// permits plain GETs to paths like /pods/x/proxy for debugging.
+	if isReadOnly(r) {
+		return "", true
+	}
+
+	// Upgrade subresources (exec/attach/portforward/proxy) require
+	// AllowUpgrade for non-safe methods (POST/PUT/DELETE/etc), since they
 	// tunnel traffic past HTTP filtering. Namespace allowlist still applies.
 	if isUpgradeSub {
 		if !p.AllowUpgrade {
-			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
+			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", r.Method, resourceLabel(info))), false
 		}
 		if reason, ok := p.checkNamespace(info); !ok {
 			return reason, false
 		}
-		return "", true
-	}
-
-	// Upgrade header on a non-upgrade path is suspect; block regardless of
-	// AllowUpgrade. This closes the Codex P1 bypass where an Upgrade header
-	// on DELETE /pods/<n> would short-circuit policy.
-	if upgrade {
-		return p.deny("protocol upgrade not permitted on this path"), false
-	}
-
-	if isReadOnly(r) {
 		return "", true
 	}
 	if isNonMutatingPost(r) {
