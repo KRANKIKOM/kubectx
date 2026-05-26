@@ -170,6 +170,7 @@ func TestResolveAdvertise(t *testing.T) {
 		{"empty advertise errors", "", "0.0.0.0:8443", "", "--advertise is required"},
 		{"empty host with port errors", ":8443", "0.0.0.0:8443", "", "--advertise must include a hostname"},
 		{"port 0 errors", "host:0", "0.0.0.0:0", "", "must use a fixed port"},
+		{"empty port errors", "host:", "0.0.0.0:0", "", "must use a fixed port"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {

@@ -192,24 +192,37 @@ func TestPolicy_Decide_UpgradeBypass_Codex(t *testing.T) {
 }
 
 func TestPolicy_Decide_PodConnectSubresources(t *testing.T) {
+	// kubectl exec/attach/port-forward all send Upgrade headers. That's
+	// the request shape Policy.AllowUpgrade gates on. A plain GET to the
+	// same path without Upgrade has no privileged effect (apiserver
+	// returns 400) and matches the original `-r` behavior of allowing
+	// safe methods.
 	cases := []struct {
 		name         string
 		allowUpgrade bool
 		method       string
 		path         string
+		upgrade      bool
 		allowed      bool
 	}{
-		{"exec blocked when AllowUpgrade=false", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", false},
-		{"exec allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true},
-		{"attach allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/attach", true},
-		{"portforward allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/portforward", true},
+		{"exec+upgrade blocked under strict", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true, false},
+		{"exec+upgrade allowed under relaxed", true, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true, true},
+		{"attach+upgrade allowed under relaxed", true, "GET", "/api/v1/namespaces/foo/pods/bar/attach", true, true},
+		{"portforward+upgrade allowed under relaxed", true, "GET", "/api/v1/namespaces/foo/pods/bar/portforward", true, true},
+		// Without an Upgrade header the safe-method path applies — matches
+		// original `-r` behavior of allowing GETs.
+		{"exec GET without upgrade is just a safe read", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", false, true},
 		// pods/eviction is a normal write — guarded by AllowWriteResources, not upgrade.
-		{"eviction needs pods write rule", true, "POST", "/api/v1/namespaces/foo/pods/bar/eviction", false},
+		{"eviction needs pods write rule", true, "POST", "/api/v1/namespaces/foo/pods/bar/eviction", false, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			p := Policy{AllowUpgrade: tt.allowUpgrade}
 			r := httptest.NewRequest(tt.method, tt.path, nil)
+			if tt.upgrade {
+				r.Header.Set("Connection", "Upgrade")
+				r.Header.Set("Upgrade", "SPDY/3.1")
+			}
 			if _, ok := p.Decide(r); ok != tt.allowed {
 				t.Errorf("Decide() allowed=%v, want %v", ok, tt.allowed)
 			}

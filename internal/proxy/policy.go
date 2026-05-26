@@ -112,13 +112,17 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		Group: info.Group, Resource: info.Resource, Subresource: info.Subresource,
 	}]
 
-	// Pod connect subresources (pods/{exec,attach,portforward}) are a
-	// special class: they require AllowUpgrade because they tunnel
-	// arbitrary traffic past HTTP filtering. Namespace allowlist still
-	// applies. NOTE: nodes/proxy, services/proxy, and pods/proxy are NOT
-	// in this set — they fall through to the write check, where they're
-	// blocked unless the underlying resource is in AllowWriteResources.
-	if isPodConnect {
+	// Pod connect subresources (pods/{exec,attach,portforward}) with an
+	// Upgrade header are the only way kubectl exec/cp/port-forward can
+	// reach the apiserver. Gated by AllowUpgrade and the namespace
+	// allowlist. A plain GET to /pods/x/exec without Upgrade has no
+	// privileged effect (apiserver returns 400) and falls through to the
+	// normal isReadOnly path — matching the original `-r` behavior.
+	//
+	// NOTE: nodes/proxy, services/proxy, and pods/proxy are NOT in this
+	// set — they fall through to the write check, where they're blocked
+	// unless the underlying resource is in AllowWriteResources.
+	if isPodConnect && upgrade {
 		if !p.AllowUpgrade {
 			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
 		}
@@ -128,9 +132,10 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		return "", true
 	}
 
-	// Upgrade header on a non-pod-connect path is suspect; block regardless
-	// of AllowUpgrade. This closes the bypass where an Upgrade header on
-	// DELETE /pods/<n> or POST /nodes/<n>/proxy would short-circuit policy.
+	// Upgrade header on anything other than a pod connect subresource is
+	// suspect; block regardless of AllowUpgrade. This closes the bypass
+	// where an Upgrade header on DELETE /pods/<n> or POST /nodes/<n>/proxy
+	// would short-circuit policy.
 	if upgrade {
 		return p.deny("protocol upgrade not permitted on this path"), false
 	}
