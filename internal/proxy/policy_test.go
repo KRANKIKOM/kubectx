@@ -230,6 +230,35 @@ func TestPolicy_Decide_PodConnectSubresources(t *testing.T) {
 	}
 }
 
+// Even with AllowUpgrade=true, only GET and POST are accepted on the
+// pod-connect subresources. A DELETE/PUT/PATCH with an Upgrade header
+// is nonsensical and must be blocked at the proxy rather than relying
+// on the apiserver to reject.
+func TestPolicy_Decide_PodConnectMethodAllowlist(t *testing.T) {
+	p := Policy{AllowUpgrade: true}
+	cases := []struct {
+		method  string
+		allowed bool
+	}{
+		{"GET", true},
+		{"POST", true},
+		{"DELETE", false},
+		{"PUT", false},
+		{"PATCH", false},
+		{"OPTIONS", false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.method, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, "/api/v1/namespaces/foo/pods/bar/exec", nil)
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Upgrade", "SPDY/3.1")
+			if _, ok := p.Decide(r); ok != tt.allowed {
+				t.Errorf("%s allowed=%v, want %v", tt.method, ok, tt.allowed)
+			}
+		})
+	}
+}
+
 // AllowUpgrade only opens pod connect subresources — never the *other*
 // "proxy"-named subresources that tunnel raw HTTP into a kubelet or
 // service. Those must be gated by the normal write allowlist.

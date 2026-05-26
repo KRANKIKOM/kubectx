@@ -114,10 +114,10 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 
 	// Pod connect subresources (pods/{exec,attach,portforward}) with an
 	// Upgrade header are the only way kubectl exec/cp/port-forward can
-	// reach the apiserver. Gated by AllowUpgrade and the namespace
-	// allowlist. A plain GET to /pods/x/exec without Upgrade has no
-	// privileged effect (apiserver returns 400) and falls through to the
-	// normal isReadOnly path — matching the original `-r` behavior.
+	// reach the apiserver. Gated by AllowUpgrade, the namespace allowlist,
+	// and the method — kubectl uses POST (and historically GET) for
+	// these; DELETE/PUT/PATCH on /pods/x/exec is nonsensical and gets
+	// blocked here instead of relying on the apiserver to reject.
 	//
 	// NOTE: nodes/proxy, services/proxy, and pods/proxy are NOT in this
 	// set — they fall through to the write check, where they're blocked
@@ -125,6 +125,9 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 	if isPodConnect && upgrade {
 		if !p.AllowUpgrade {
 			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			return p.deny(fmt.Sprintf("%s on %s/%s not allowed (only GET/POST)", r.Method, resourceLabel(info), info.Subresource)), false
 		}
 		if reason, ok := p.checkNamespace(info); !ok {
 			return reason, false
