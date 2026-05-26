@@ -182,6 +182,9 @@ func resolveAdvertise(advertise, listen string) (*url.URL, error) {
 		host = advertise
 		port = listenPort
 	}
+	if host == "" {
+		return nil, fmt.Errorf("--advertise must include a hostname the sandbox can dial (got %q)", advertise)
+	}
 	if port == "0" {
 		return nil, fmt.Errorf("--advertise must use a fixed port; pick one via --listen=host:PORT")
 	}
@@ -203,12 +206,19 @@ func tlsSANIPs(host string) []net.IP {
 	return nil
 }
 
+// isLoopback reports whether host resolves to a loopback address. An
+// empty host is NOT treated as loopback — `--advertise=:8443` with an
+// empty host would let `--no-tls` slip past the safety check while the
+// proxy is actually bound on 0.0.0.0.
 func isLoopback(host string) bool {
-	if host == "" || host == "localhost" {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
 		return ip.IsLoopback()
 	}
-	return strings.EqualFold(host, "localhost")
+	return false
 }
