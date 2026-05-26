@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
@@ -48,10 +49,11 @@ func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 type ReadonlyProxy struct {
 	server   *http.Server
 	listener net.Listener
-	// serveErr carries the first non-ErrServerClosed error from the
-	// serve goroutine, if any. Buffered so the goroutine can send-and-exit
-	// without a receiver. Callers consult Err() to detect a crashed proxy.
-	serveErr chan error
+	// err holds the first non-ErrServerClosed error from the serve
+	// goroutine, if any. Stored via atomic.Pointer so Err() is safe to
+	// call concurrently and idempotently (matching context.Err's
+	// semantics: once non-nil, stays non-nil).
+	err atomic.Pointer[error]
 }
 
 // Config holds information needed to start the readonly proxy.
@@ -137,7 +139,7 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 	if cfg.TLS != nil {
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cfg.TLS.Cert}}
 	}
-	serveErr := make(chan error, 1)
+	p := &ReadonlyProxy{server: srv, listener: listener}
 	go func() {
 		defer listener.Close()
 		var err error
@@ -148,33 +150,24 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		}
 		if err != nil && err != http.ErrServerClosed {
 			stderrLog.Printf("server died: %v", err)
-			serveErr <- err
+			p.err.Store(&err)
 		}
-		close(serveErr)
 	}()
 
 	debugLog.Printf("started on %s, proxying to %s", listener.Addr(), targetURL)
 
-	return &ReadonlyProxy{
-		server:   srv,
-		listener: listener,
-		serveErr: serveErr,
-	}, nil
+	return p, nil
 }
 
 // Err returns a non-nil error if the serve goroutine has terminated with
-// anything other than the expected Shutdown sentinel. Returns nil while
-// the proxy is still serving (or after a clean shutdown).
+// anything other than the expected Shutdown sentinel. Idempotent: once
+// non-nil, stays non-nil across calls. Returns nil while the proxy is
+// still serving (or after a clean shutdown).
 func (p *ReadonlyProxy) Err() error {
-	select {
-	case err, ok := <-p.serveErr:
-		if !ok {
-			return nil
-		}
-		return err
-	default:
-		return nil
+	if e := p.err.Load(); e != nil {
+		return *e
 	}
+	return nil
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:54321").

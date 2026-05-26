@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -165,6 +166,27 @@ func TestServeMode_TLSTokenPolicy(t *testing.T) {
 			t.Errorf("upstream saw Authorization=%q; must be stripped", sawAuth)
 		}
 	})
+}
+
+// TestProxy_ErrIsIdempotent verifies Err() returns the same error
+// across repeated calls — both ServeOp's poll loop and any external
+// caller rely on this. The previous channel-based implementation was
+// destructive (first call consumed the error, subsequent calls saw nil).
+func TestProxy_ErrIsIdempotent(t *testing.T) {
+	p := &ReadonlyProxy{}
+	if got := p.Err(); got != nil {
+		t.Fatalf("fresh proxy Err() = %v, want nil", got)
+	}
+	// Simulate the serve goroutine storing a terminal error.
+	stored := fmt.Errorf("server died")
+	p.err.Store(&stored)
+
+	for i := 0; i < 5; i++ {
+		got := p.Err()
+		if got == nil || got.Error() != "server died" {
+			t.Errorf("call %d: Err() = %v, want %q (non-destructive)", i, got, "server died")
+		}
+	}
 }
 
 // TestStart_RequiresAuthAndTLSForNonLoopback exercises the defense-in-depth
