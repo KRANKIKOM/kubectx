@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
@@ -52,6 +53,10 @@ type ReadonlyProxy struct {
 	// serve goroutine, if any. Buffered so the goroutine can send-and-exit
 	// without a receiver. Callers consult Err() to detect a crashed proxy.
 	serveErr chan error
+	// errOnce ensures the error is read from serveErr only once and cached
+	// in cachedErr, making Err() idempotent.
+	errOnce   sync.Once
+	cachedErr error
 }
 
 // Config holds information needed to start the readonly proxy.
@@ -164,17 +169,20 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 
 // Err returns a non-nil error if the serve goroutine has terminated with
 // anything other than the expected Shutdown sentinel. Returns nil while
-// the proxy is still serving (or after a clean shutdown).
+// the proxy is still serving (or after a clean shutdown). This method is
+// safe to call concurrently and multiple times — the error is cached after
+// the first read.
 func (p *ReadonlyProxy) Err() error {
-	select {
-	case err, ok := <-p.serveErr:
-		if !ok {
-			return nil
+	p.errOnce.Do(func() {
+		select {
+		case err, ok := <-p.serveErr:
+			if ok {
+				p.cachedErr = err
+			}
+		default:
 		}
-		return err
-	default:
-		return nil
-	}
+	})
+	return p.cachedErr
 }
 
 // Addr returns the listener address (e.g. "127.0.0.1:54321").
