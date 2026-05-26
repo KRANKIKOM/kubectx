@@ -84,6 +84,50 @@ allowWriteResources:
   - apps/deployments
 ```
 
+#### Daemon mode (for sandboxed agents)
+
+For use cases where the proxy needs to run on the host but be reached
+from a sandboxed container or VM (e.g. giving a coding agent scoped
+kubectl access), add `--serve`:
+
+```sh
+$ kubectx --serve \
+    --mode=relaxed \
+    --listen=0.0.0.0:8443 \
+    --advertise=host.docker.internal:8443 \
+    --kubeconfig-out=./agent/kubeconfig.yaml \
+    prod
+[kubectx policy serve] policy="relaxed" listen=0.0.0.0:8443 advertise=host.docker.internal:8443 tls=true
+[kubectx policy serve] sandbox kubeconfig written to ./agent/kubeconfig.yaml
+[kubectx policy serve] ready — press Ctrl-C to stop
+```
+
+The generated kubeconfig contains:
+- The advertise URL (`https://host.docker.internal:8443`)
+- An auto-generated bearer token
+- An inline CA for the auto-generated self-signed TLS cert
+
+Mount it into the agent's container and it just works:
+
+```sh
+$ docker run -v $(pwd)/agent/kubeconfig.yaml:/root/.kube/config my-agent
+```
+
+Every kubectl/helm/k9s call from inside the sandbox goes through the
+proxy on the host, where policy enforcement still applies. The agent
+never sees the original cluster credentials.
+
+`--listen` is the bind address (what kubectx opens on the host).
+`--advertise` is what gets written into the sandbox kubeconfig — they
+differ because the host and the sandbox see different networks. Common
+advertise values:
+
+| Sandbox runtime | --advertise |
+|---|---|
+| Docker Desktop (macOS/Windows) | `host.docker.internal:8443` |
+| Linux Docker default bridge | `172.17.0.1:8443` |
+| Lima/Colima VM | gateway IP (often `192.168.5.2:8443`) |
+
 Rename context:
 
 ```sh

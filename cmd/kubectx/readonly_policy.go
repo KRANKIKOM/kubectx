@@ -22,7 +22,8 @@ func isPolicyTrigger(arg string) bool {
 	}
 	key, _, _ := strings.Cut(arg, "=")
 	switch key {
-	case "--mode", "--policy", "--allow-write", "--namespace", "-n", "--allow-exec":
+	case "--mode", "--policy", "--allow-write", "--namespace", "-n", "--allow-exec",
+		"--serve", "--listen", "--advertise", "--kubeconfig-out", "--no-tls":
 		return true
 	}
 	return false
@@ -87,6 +88,25 @@ func (f ReadonlyPolicyFlags) isZero() bool {
 		len(f.AllowWrite) == 0 && len(f.Namespaces) == 0 && !f.AllowExec
 }
 
+// serveOp builds a ServeOp from the parsed flags, asserting that flags
+// only meaningful for serve mode aren't accidentally set for shell mode.
+func (f ReadonlyPolicyFlags) serveOp(target string) ServeOp {
+	return ServeOp{
+		Target:        target,
+		PolicyFlags:   f,
+		Listen:        f.Listen,
+		Advertise:     f.Advertise,
+		KubeconfigOut: f.KubeconfigOut,
+		NoTLS:         f.NoTLS,
+	}
+}
+
+// hasServeOnlyFlag reports whether any of the serve-mode flags were set.
+// Used so the parser can flag misuses like `kubectx --listen=foo -r ctx`.
+func (f ReadonlyPolicyFlags) hasServeOnlyFlag() bool {
+	return f.Listen != "" || f.Advertise != "" || f.KubeconfigOut != "" || f.NoTLS
+}
+
 // parseReadonlyFlags scans argv (the args *after* `-r`/`--readonly`, or the
 // full argv when invoked via a bare policy flag) and pulls out policy flags
 // plus the positional context name. Flags may appear before or after the
@@ -137,6 +157,34 @@ func parseReadonlyFlags(argv []string) (target string, flags ReadonlyPolicyFlags
 				return "", flags, fmt.Errorf("--allow-exec does not take a value")
 			}
 			flags.AllowExec = true
+		case "--serve":
+			if hasEq {
+				return "", flags, fmt.Errorf("--serve does not take a value")
+			}
+			flags.Serve = true
+		case "--listen":
+			v, e := take()
+			if e != nil {
+				return "", flags, e
+			}
+			flags.Listen = v
+		case "--advertise":
+			v, e := take()
+			if e != nil {
+				return "", flags, e
+			}
+			flags.Advertise = v
+		case "--kubeconfig-out":
+			v, e := take()
+			if e != nil {
+				return "", flags, e
+			}
+			flags.KubeconfigOut = v
+		case "--no-tls":
+			if hasEq {
+				return "", flags, fmt.Errorf("--no-tls does not take a value")
+			}
+			flags.NoTLS = true
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return "", flags, fmt.Errorf("unknown policy flag: %s", arg)

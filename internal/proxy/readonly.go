@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -56,6 +57,16 @@ type Config struct {
 	// Policy describes which requests to allow. The zero value is
 	// equivalent to PresetStrict.
 	Policy Policy
+	// ListenAddr controls where the listener binds, e.g. "0.0.0.0:8443".
+	// Empty defaults to "127.0.0.1:0" (loopback, ephemeral port).
+	ListenAddr string
+	// TLS, when set, makes the proxy serve HTTPS using the provided
+	// certificate. Required for cross-sandbox use; loopback can stay HTTP.
+	TLS *ServerTLS
+	// AuthToken, when set, requires `Authorization: Bearer <token>` on
+	// every request. Required whenever the listener is reachable from
+	// anything other than loopback.
+	AuthToken string
 }
 
 // Start creates and starts a readonly reverse proxy on a random localhost port.
@@ -81,11 +92,18 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	handler := NewHandlerWithPolicy(targetURL, transport, cfg.Policy)
+	var handler http.Handler = NewHandlerWithPolicy(targetURL, transport, cfg.Policy)
+	if cfg.AuthToken != "" {
+		handler = withTokenAuth(cfg.AuthToken, handler)
+	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listenAddr := cfg.ListenAddr
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to listen: %w", err)
+		return nil, fmt.Errorf("failed to listen on %s: %w", listenAddr, err)
 	}
 
 	// Surface server errors loudly. A dead proxy means kubectl gets
@@ -93,9 +111,18 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 	// "readonly shell" badge while no enforcement is happening.
 	stderrLog := log.New(os.Stderr, "[kubectx readonly-proxy] ", log.Ltime)
 	srv := &http.Server{Handler: handler, ErrorLog: stderrLog}
+	if cfg.TLS != nil {
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cfg.TLS.Cert}}
+	}
 	go func() {
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			stderrLog.Printf("server died: %v", err)
+		var serveErr error
+		if cfg.TLS != nil {
+			serveErr = srv.ServeTLS(listener, "", "")
+		} else {
+			serveErr = srv.Serve(listener)
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			stderrLog.Printf("server died: %v", serveErr)
 		}
 	}()
 

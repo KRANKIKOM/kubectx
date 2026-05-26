@@ -75,6 +75,18 @@ Despite the `-r` flag name, this is a general **policy-scoped shell** — readon
 
 Set `DEBUG=1` (the env var is just `DEBUG`, not `KUBECTX_DEBUG`) to see proxy decisions on stderr (`[readonly-proxy] >> METHOD PATH -> proxied/405`). Server-loop errors are unconditionally logged with prefix `[kubectx readonly-proxy]`.
 
+### Daemon / serve mode (`cmd/kubectx/serve.go`)
+
+`kubectx --serve --advertise=host:port --kubeconfig-out=path ctx` runs the policy proxy without spawning a subshell, so a remote consumer (typically an agent in a sandbox container) can use it over a network. Key pieces:
+
+- `proxy.GenerateSelfSignedTLS` (`tls.go`) — generates an ECDSA-P256 cert covering the advertise DNS/IP SANs. CAPEM is returned for embedding in the sandbox kubeconfig.
+- `proxy.GenerateToken` + `withTokenAuth` (`auth.go`) — 256-bit random bearer token, constant-time comparison on each request. Wraps the policy handler so authn runs before policy.
+- `proxy.EmitSandboxKubeconfig` (`kubeconfig_emit.go`) — builds the YAML the sandbox mounts.
+- `proxy.Config` gains `ListenAddr`, `TLS`, `AuthToken`. When TLS is set, `srv.ServeTLS` is used; when `AuthToken` is non-empty, the handler is wrapped with auth.
+- `ServeOp` (`cmd/kubectx/serve.go`) ties it together: builds policy, generates TLS+token, starts the proxy, writes the sandbox kubeconfig, blocks on SIGINT/SIGTERM.
+
+`--listen` (bind address) and `--advertise` (host:port written into the sandbox kubeconfig) are separate because the host and sandbox see different networks. `--no-tls` is only accepted when `--advertise` resolves to loopback.
+
 ### Tests
 
 - Go unit tests live next to the code (`flags_test.go`, `proxy/readonly_test.go`, etc.) and are table-driven.

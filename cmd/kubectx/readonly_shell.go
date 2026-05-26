@@ -28,18 +28,28 @@ type ReadonlyShellOp struct {
 }
 
 // ReadonlyPolicyFlags captures the policy-shaping flags accepted by the
-// readonly shell entry points. The zero value yields the strict default.
+// readonly shell and serve entry points. The zero value yields the strict
+// default.
 //
 // Precedence (see buildPolicy):
 //   - PolicyFile and Mode are mutually exclusive bases. If both are set,
 //     buildPolicy errors out rather than silently picking one.
 //   - AllowWrite, Namespaces and AllowExec layer on top of the chosen base.
+//
+// The Serve* fields are only consulted when --serve is also set; they
+// describe how the daemon-mode proxy exposes itself to a sandbox.
 type ReadonlyPolicyFlags struct {
 	Mode       string
 	PolicyFile string
 	AllowWrite []string
 	Namespaces []string
 	AllowExec  bool
+
+	Serve         bool
+	Listen        string
+	Advertise     string
+	KubeconfigOut string
+	NoTLS         bool
 }
 
 func (op InteractiveReadonlyShellOp) Run(_, stderr io.Writer) error {

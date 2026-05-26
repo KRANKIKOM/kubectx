@@ -66,6 +66,15 @@ func parseArgs(argv []string) Op {
 			}
 			return UnsupportedOp{Err: err}
 		}
+		if flags.Serve {
+			if target == "" {
+				return UnsupportedOp{Err: fmt.Errorf("--serve requires a context name argument")}
+			}
+			return flags.serveOp(target)
+		}
+		if flags.hasServeOnlyFlag() {
+			return UnsupportedOp{Err: fmt.Errorf("--listen/--advertise/--kubeconfig-out/--no-tls require --serve")}
+		}
 		if target == "" {
 			if cmdutil.IsInteractiveMode(os.Stdout) {
 				return InteractiveReadonlyShellOp{SelfCmd: os.Args[0], PolicyFlags: flags}

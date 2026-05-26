@@ -58,4 +58,3 @@ func LoadPolicyFile(path string) (Policy, error) {
 		AllowWriteResources: rules,
 	}, nil
 }
-
