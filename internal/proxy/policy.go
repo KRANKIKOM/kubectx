@@ -6,15 +6,24 @@ import (
 	"strings"
 )
 
-// upgradeSubresources is the set of pod subresources that legitimately use
-// protocol upgrades (SPDY/WebSocket) and would let a client tunnel arbitrary
-// traffic past HTTP-method filtering. Treated as a single class gated by
-// Policy.AllowUpgrade regardless of method.
-var upgradeSubresources = map[string]struct{}{
-	"exec":        {},
-	"attach":      {},
-	"portforward": {},
-	"proxy":       {},
+// podConnectKey identifies a known Kubernetes "connect" subresource.
+// Matching by (group, resource, subresource) — not just subresource name —
+// is important because the bare "proxy" name appears on cluster-scoped
+// `nodes/proxy` and `services/proxy` paths that tunnel arbitrary HTTP
+// straight to a kubelet or service. Those must NOT be bypassed by
+// AllowUpgrade; they fall through to the normal write check.
+type podConnectKey struct {
+	Group, Resource, Subresource string
+}
+
+// podConnectSubresources is the closed set of pod subresources that
+// legitimately use protocol upgrades for interactive sessions. Any other
+// "exec/attach/portforward"-named subresource (e.g. on a custom resource)
+// must still pass the normal write check.
+var podConnectSubresources = map[podConnectKey]struct{}{
+	{Group: "", Resource: "pods", Subresource: "exec"}:        {},
+	{Group: "", Resource: "pods", Subresource: "attach"}:      {},
+	{Group: "", Resource: "pods", Subresource: "portforward"}: {},
 }
 
 // ResourceRule allows writes on a specific (group, resource).
@@ -99,12 +108,17 @@ type Policy struct {
 func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 	info := parseAPIPath(r.URL.Path)
 	upgrade := isUpgrade(r)
-	_, isUpgradeSub := upgradeSubresources[info.Subresource]
+	_, isPodConnect := podConnectSubresources[podConnectKey{
+		Group: info.Group, Resource: info.Resource, Subresource: info.Subresource,
+	}]
 
-	// Upgrade subresources (exec/attach/portforward/proxy) are a special
-	// class: they require AllowUpgrade regardless of method, since they
-	// tunnel traffic past HTTP filtering. Namespace allowlist still applies.
-	if isUpgradeSub {
+	// Pod connect subresources (pods/{exec,attach,portforward}) are a
+	// special class: they require AllowUpgrade because they tunnel
+	// arbitrary traffic past HTTP filtering. Namespace allowlist still
+	// applies. NOTE: nodes/proxy, services/proxy, and pods/proxy are NOT
+	// in this set — they fall through to the write check, where they're
+	// blocked unless the underlying resource is in AllowWriteResources.
+	if isPodConnect {
 		if !p.AllowUpgrade {
 			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
 		}
@@ -114,9 +128,9 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		return "", true
 	}
 
-	// Upgrade header on a non-upgrade path is suspect; block regardless of
-	// AllowUpgrade. This closes the Codex P1 bypass where an Upgrade header
-	// on DELETE /pods/<n> would short-circuit policy.
+	// Upgrade header on a non-pod-connect path is suspect; block regardless
+	// of AllowUpgrade. This closes the bypass where an Upgrade header on
+	// DELETE /pods/<n> or POST /nodes/<n>/proxy would short-circuit policy.
 	if upgrade {
 		return p.deny("protocol upgrade not permitted on this path"), false
 	}

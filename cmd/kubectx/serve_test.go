@@ -30,6 +30,31 @@ func TestWriteKubeconfigOut_TightensExistingMode(t *testing.T) {
 	}
 }
 
+// Regression: chmod must happen *before* the Write so a process killed
+// between truncation and write never leaves a half-written-but-readable
+// token. After writeKubeconfigOut, the resulting file must always be
+// 0600 — including the case where it was previously 0644.
+func TestWriteKubeconfigOut_ChmodHappensBeforeWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kc.yaml")
+	// Create with loose perms — old behavior would Write before Chmod.
+	if err := os.WriteFile(path, []byte("stale\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeKubeconfigOut(path, []byte("token: secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("mode = %#o, want 0600", got)
+	}
+	// And the contents must be the new ones (sanity).
+	got, _ := os.ReadFile(path)
+	if string(got) != "token: secret\n" {
+		t.Errorf("content = %q", got)
+	}
+}
+
 func TestWriteKubeconfigOut_NewFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "new.yaml")

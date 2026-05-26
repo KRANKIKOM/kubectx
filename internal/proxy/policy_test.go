@@ -191,7 +191,7 @@ func TestPolicy_Decide_UpgradeBypass_Codex(t *testing.T) {
 	}
 }
 
-func TestPolicy_Decide_UpgradeSubresources(t *testing.T) {
+func TestPolicy_Decide_PodConnectSubresources(t *testing.T) {
 	cases := []struct {
 		name         string
 		allowUpgrade bool
@@ -203,9 +203,6 @@ func TestPolicy_Decide_UpgradeSubresources(t *testing.T) {
 		{"exec allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/exec", true},
 		{"attach allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/attach", true},
 		{"portforward allowed when AllowUpgrade=true", true, "GET", "/api/v1/namespaces/foo/pods/bar/portforward", true},
-		// pods/proxy: a sneaky tunneling subresource. Treated like an upgrade.
-		{"proxy blocked when AllowUpgrade=false", false, "POST", "/api/v1/namespaces/foo/pods/bar/proxy", false},
-		{"proxy allowed when AllowUpgrade=true", true, "POST", "/api/v1/namespaces/foo/pods/bar/proxy", true},
 		// pods/eviction is a normal write — guarded by AllowWriteResources, not upgrade.
 		{"eviction needs pods write rule", true, "POST", "/api/v1/namespaces/foo/pods/bar/eviction", false},
 	}
@@ -217,6 +214,40 @@ func TestPolicy_Decide_UpgradeSubresources(t *testing.T) {
 				t.Errorf("Decide() allowed=%v, want %v", ok, tt.allowed)
 			}
 		})
+	}
+}
+
+// AllowUpgrade only opens pod connect subresources — never the *other*
+// "proxy"-named subresources that tunnel raw HTTP into a kubelet or
+// service. Those must be gated by the normal write allowlist.
+func TestPolicy_Decide_NonPodConnectSubresourcesNotBypassed(t *testing.T) {
+	relaxed := Policy{AllowUpgrade: true}
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"node proxy POST", "/api/v1/nodes/n1/proxy/healthz"},
+		{"service proxy POST", "/api/v1/namespaces/ns/services/svc/proxy/foo"},
+		{"pod proxy POST", "/api/v1/namespaces/ns/pods/p/proxy/foo"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", tt.path, nil)
+			if _, ok := relaxed.Decide(r); ok {
+				t.Error("AllowUpgrade must not bypass *_proxy subresources; need explicit AllowWriteResources entry")
+			}
+		})
+	}
+}
+
+// CRD spoofing: a custom resource with subresource literally named
+// "exec"/"attach"/"portforward" under a different group is NOT a pod
+// connect subresource and must not be bypassed.
+func TestPolicy_Decide_CRDExecNotBypassed(t *testing.T) {
+	relaxed := Policy{AllowUpgrade: true}
+	r := httptest.NewRequest("POST", "/apis/evil.io/v1/namespaces/ns/widgets/w/exec", nil)
+	if _, ok := relaxed.Decide(r); ok {
+		t.Error("CRD subresource named 'exec' must not be bypassed by AllowUpgrade")
 	}
 }
 

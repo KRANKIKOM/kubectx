@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -172,20 +171,22 @@ func checkNoTLS(noTLS bool, listen string, advertise *url.URL) error {
 }
 
 // writeKubeconfigOut writes the emitted sandbox kubeconfig to path with
-// mode 0600. Unlike os.WriteFile, this explicitly chmods after writing so
-// a pre-existing file with looser permissions gets tightened to match the
-// fresh bearer-token-bearing contents.
+// mode 0600. Unlike os.WriteFile, this tightens permissions *before*
+// writing — if path already exists at 0644, OpenFile preserves the loose
+// mode, and a chmod-after-write would leak the bearer token to other
+// users on the box during the window between Write and Chmod (and
+// permanently if the process died in between).
 func writeKubeconfigOut(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open kubeconfig %s: %w", path, err)
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return fmt.Errorf("chmod kubeconfig %s: %w", path, err)
+	}
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("write kubeconfig %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod kubeconfig %s: %w", path, err)
 	}
 	return nil
 }
@@ -201,11 +202,16 @@ func shutdown(p *proxy.ReadonlyProxy) {
 
 // writeOriginalKubeconfigForProxy minifies the current kubeconfig down to
 // the target context and writes it to a temp file. Returned cleanup
-// removes the temp file.
+// removes the temp file. Honors $KUBECTL via resolveKubectl, mirroring
+// the shell/-r entry points.
 func writeOriginalKubeconfigForProxy(target string) (string, func(), error) {
-	out, err := exec.Command("kubectl", "config", "view", "--minify", "--flatten", "--context", target).Output()
+	kubectlPath, err := resolveKubectl()
 	if err != nil {
-		return "", nil, fmt.Errorf("kubectl config view: %w", err)
+		return "", nil, err
+	}
+	out, err := extractMinimalKubeconfig(kubectlPath, target)
+	if err != nil {
+		return "", nil, err
 	}
 	f, err := os.CreateTemp("", "kubectx-serve-orig-*.yaml")
 	if err != nil {
