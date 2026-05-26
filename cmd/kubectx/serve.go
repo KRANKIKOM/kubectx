@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -287,19 +286,7 @@ func tlsSANIPs(host string) []net.IP {
 	return nil
 }
 
-// isLoopback reports whether host resolves to a loopback address. An
-// empty host is NOT treated as loopback — `--advertise=:8443` with an
-// empty host would let `--no-tls` slip past the safety check while the
-// proxy is actually bound on 0.0.0.0.
-func isLoopback(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
-}
+// isLoopback is an alias of proxy.HostIsLoopback so cmd-side flag
+// validation shares the same loopback definition the proxy uses for its
+// defense-in-depth check.
+var isLoopback = proxy.HostIsLoopback

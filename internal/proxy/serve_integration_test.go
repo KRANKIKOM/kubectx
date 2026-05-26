@@ -190,8 +190,8 @@ func TestStart_RequiresAuthAndTLSForNonLoopback(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.host, func(t *testing.T) {
-			if got := hostIsLoopback(tt.host); got != tt.want {
-				t.Errorf("hostIsLoopback(%q) = %v, want %v", tt.host, got, tt.want)
+			if got := HostIsLoopback(tt.host); got != tt.want {
+				t.Errorf("HostIsLoopback(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
 	}
