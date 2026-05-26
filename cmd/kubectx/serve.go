@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -161,10 +160,10 @@ func checkNoTLS(noTLS bool, listen string, advertise *url.URL) error {
 		return nil
 	}
 	listenHost, _, _ := net.SplitHostPort(listen)
-	if !isLoopback(listenHost) {
+	if !proxy.IsLoopback(listenHost) {
 		return fmt.Errorf("--no-tls requires --listen to bind on loopback (got %q); the proxy would otherwise serve a bearer token in plaintext over the network", listenHost)
 	}
-	if !isLoopback(advertise.Hostname()) {
+	if !proxy.IsLoopback(advertise.Hostname()) {
 		return fmt.Errorf("--no-tls is only allowed when --advertise is loopback (got %q)", advertise.Hostname())
 	}
 	return nil
@@ -234,7 +233,7 @@ func resolveListenAddr(listen string, advertise *url.URL) (string, error) {
 		// loopback advertise, stay on 127.0.0.1 — same blast radius as
 		// the legacy `-r` shell mode.
 		host := "127.0.0.1"
-		if !isLoopback(advertise.Hostname()) {
+		if !proxy.IsLoopback(advertise.Hostname()) {
 			host = "0.0.0.0"
 		}
 		_, port, _ := net.SplitHostPort(advertise.Host)
@@ -285,21 +284,4 @@ func tlsSANIPs(host string) []net.IP {
 		return []net.IP{ip}
 	}
 	return nil
-}
-
-// isLoopback reports whether host resolves to a loopback address. An
-// empty host is NOT treated as loopback — `--advertise=:8443` with an
-// empty host would let `--no-tls` slip past the safety check while the
-// proxy is actually bound on 0.0.0.0.
-func isLoopback(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
 }

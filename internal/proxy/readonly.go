@@ -110,7 +110,7 @@ func Start(cfg Config) (*ReadonlyProxy, error) {
 	// listener on anything other than loopback. The CLI layer enforces
 	// this too, but keeping the invariant in the proxy package means any
 	// future caller gets the same guarantee.
-	if host, _, _ := net.SplitHostPort(listenAddr); !hostIsLoopback(host) {
+	if host, _, _ := net.SplitHostPort(listenAddr); !IsLoopback(host) {
 		if cfg.TLS == nil {
 			return nil, fmt.Errorf("proxy.Start: non-loopback listen %q requires TLS", listenAddr)
 		}
@@ -222,9 +222,9 @@ func NewHandlerWithPolicy(target *url.URL, transport http.RoundTripper, policy P
 	})
 }
 
-// hostIsLoopback reports whether a host literal (no port) is a loopback
+// IsLoopback reports whether a host literal (no port) is a loopback
 // address. Empty / 0.0.0.0 / non-loopback DNS names all return false.
-func hostIsLoopback(host string) bool {
+func IsLoopback(host string) bool {
 	if host == "" {
 		return false
 	}

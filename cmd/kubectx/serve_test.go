@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ahmetb/kubectx/internal/proxy"
 )
 
 // writeKubeconfigOut must always end with mode 0600 — even if the path
@@ -117,8 +119,8 @@ func TestIsLoopback(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.host, func(t *testing.T) {
-			if got := isLoopback(tt.host); got != tt.want {
-				t.Errorf("isLoopback(%q) = %v, want %v", tt.host, got, tt.want)
+			if got := proxy.IsLoopback(tt.host); got != tt.want {
+				t.Errorf("proxy.IsLoopback(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
 	}

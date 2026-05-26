@@ -161,7 +161,8 @@ func waitForProxyHandshake(addr string, budget time.Duration, tlsConfig *tls.Con
 		var conn net.Conn
 		var err error
 		if tlsConfig != nil {
-			conn, err = tls.Dial("tcp", addr, tlsConfig)
+			dialer := &net.Dialer{Timeout: 100 * time.Millisecond}
+			conn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
 		} else {
 			conn, err = net.DialTimeout("tcp", addr, 100*time.Millisecond)
 		}
