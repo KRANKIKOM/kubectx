@@ -126,6 +126,9 @@ func (p Policy) Decide(r *http.Request) (reason string, allowed bool) {
 		if !p.AllowUpgrade {
 			return p.deny(fmt.Sprintf("%s on %s subresource not allowed", info.Subresource, resourceLabel(info))), false
 		}
+		if r.Method != http.MethodGet {
+			return p.deny("protocol upgrade only permitted on GET"), false
+		}
 		if reason, ok := p.checkNamespace(info); !ok {
 			return reason, false
 		}

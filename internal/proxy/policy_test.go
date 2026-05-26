@@ -214,6 +214,10 @@ func TestPolicy_Decide_PodConnectSubresources(t *testing.T) {
 		{"exec GET without upgrade is just a safe read", false, "GET", "/api/v1/namespaces/foo/pods/bar/exec", false, true},
 		// pods/eviction is a normal write — guarded by AllowWriteResources, not upgrade.
 		{"eviction needs pods write rule", true, "POST", "/api/v1/namespaces/foo/pods/bar/eviction", false, false},
+		// Defense-in-depth: non-GET methods with upgrade on pod connect paths must be blocked.
+		{"DELETE+upgrade on exec blocked", true, "DELETE", "/api/v1/namespaces/foo/pods/bar/exec", true, false},
+		{"POST+upgrade on attach blocked", true, "POST", "/api/v1/namespaces/foo/pods/bar/attach", true, false},
+		{"PUT+upgrade on portforward blocked", true, "PUT", "/api/v1/namespaces/foo/pods/bar/portforward", true, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
