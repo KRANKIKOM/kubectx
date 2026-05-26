@@ -204,7 +204,7 @@ func tlsSANIPs(host string) []net.IP {
 }
 
 func isLoopback(host string) bool {
-	if host == "" || host == "localhost" {
+	if host == "localhost" {
 		return true
 	}
 	if ip := net.ParseIP(host); ip != nil {
